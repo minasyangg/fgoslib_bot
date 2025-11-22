@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Telegram Bot Monitor</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #f7f7f7; margin: 0; padding: 0; }
+    .container { max-width: 700px; margin: 40px auto; background: #fff; border-radius: 8px; box-shadow: 0 2px 8px #0001; padding: 24px; }
+    h1 { text-align: center; color: #2d6cdf; }
+    .log-list { list-style: none; padding: 0; }
+    .log-item { margin-bottom: 18px; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+    .user { color: #2d6cdf; font-weight: bold; }
+    .cmd { color: #333; }
+    .response { color: #008000; margin-top: 4px; }
+    .timestamp { color: #888; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Telegram Bot Monitor</h1>
+    <ul class="log-list" id="logList">
+      <!-- Пример лога -->
+      <li class="log-item">
+        <span class="timestamp">2025-11-23 12:00</span><br>
+        <span class="user">@username</span>: <span class="cmd">/start</span>
+        <div class="response">Ответ: Привет! Я бот.</div>
+      </li>
+      <!-- Здесь будут появляться новые логи -->
+    </ul>
+  </div>
+  <script>
+    async function fetchLogs() {
+      try {
+        const res = await fetch('/logs');
+        const logs = await res.json();
+        const logList = document.getElementById('logList');
+        logList.innerHTML = '';
+        logs.forEach(log => {
+          logList.innerHTML += `
+            <li class="log-item">
+              <span class="timestamp">${log.timestamp || ''}</span><br>
+              <span class="user">${log.username || 'user'}</span>: <span class="cmd">${log.command || ''}</span>
+              <div class="response">Ответ: ${log.response || ''}</div>
+            </li>
+          `;
+        });
+      } catch (e) {
+        // Ошибки игнорируем
+      }
+    }
+    setInterval(fetchLogs, 3000);
+    fetchLogs();
+  </script>
+</body>
+</html>
