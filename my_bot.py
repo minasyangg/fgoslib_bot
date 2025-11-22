@@ -1,3 +1,16 @@
+# ----------------------------
+# Логирование событий для мониторинга
+# ----------------------------
+from datetime import datetime
+def log_event(username, command, response):
+    log = {
+        "username": username,
+        "command": command,
+        "response": response,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    r.rpush("bot_logs", json.dumps(log))
+    r.ltrim("bot_logs", -100, -1)
 import os
 import json
 import io
@@ -92,9 +105,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
+    username = update.message.from_user.username or str(user_id)
     task_text = update.message.text or ""
     if not task_text and not update.message.photo:
         await update.message.reply_text("Пожалуйста, отправь текст задания или изображение.")
+        log_event(username, "(empty)", "Пожалуйста, отправь текст задания или изображение.")
         return
 
     # Сохраняем текст
@@ -104,21 +119,30 @@ async def handle_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
             images.append(photo.file_id)
 
     save_session(user_id, task_text, images)
-    await update.message.reply_text("Задание сохранено! Добавь /prompt если хочешь дать дополнительный промт.")
+    response = "Задание сохранено! Добавь /prompt если хочешь дать дополнительный промт."
+    await update.message.reply_text(response)
+    log_event(username, task_text or "[photo]", response)
 
 async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
+    username = update.message.from_user.username or str(user_id)
     prompt = " ".join(context.args)
     if not prompt:
-        await update.message.reply_text("Используй /prompt <твой текст>")
+        response = "Используй /prompt <твой текст>"
+        await update.message.reply_text(response)
+        log_event(username, f"/prompt", response)
         return
 
     update_prompt(user_id, prompt)
-    await update.message.reply_text("Промт сохранён! Получаем решение...")
+    response = "Промт сохранён! Получаем решение..."
+    await update.message.reply_text(response)
+    log_event(username, f"/prompt {prompt}", response)
 
     session = load_session(user_id)
     if not session:
-        await update.message.reply_text("Сессия истекла или отсутствует.")
+        response = "Сессия истекла или отсутствует."
+        await update.message.reply_text(response)
+        log_event(username, f"/prompt {prompt}", response)
         return
 
     try:
@@ -133,36 +157,60 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pdf_url = result["pdf"]  # если HF возвращает ссылку
             pdf_bytes = requests.get(pdf_url).content
             await update.message.reply_document(document=InputFile(io.BytesIO(pdf_bytes), filename="solution.pdf"))
+            log_event(username, f"/prompt {prompt}", "[PDF sent]")
         elif "text" in result:
             await update.message.reply_text(result["text"])
+            log_event(username, f"/prompt {prompt}", result["text"])
         else:
-            await update.message.reply_text("Не удалось получить решение.")
+            response = "Не удалось получить решение."
+            await update.message.reply_text(response)
+            log_event(username, f"/prompt {prompt}", response)
     except Exception as e:
         logger.exception("Ошибка при обращении к HF API")
-        await update.message.reply_text(f"Ошибка при генерации решения: {e}")
+        response = f"Ошибка при генерации решения: {e}"
+        await update.message.reply_text(response)
+        log_event(username, f"/prompt {prompt}", response)
 
 async def handle_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
+    username = update.message.from_user.username or str(user_id)
     fmt = " ".join(context.args).lower()
     if fmt not in ["md", "pdf"]:
-        await update.message.reply_text("Используй /format md или /format pdf")
+        response = "Используй /format md или /format pdf"
+        await update.message.reply_text(response)
+        log_event(username, f"/format {fmt}", response)
         return
     update_format(user_id, fmt)
-    await update.message.reply_text(f"Формат ответа установлен: {fmt}")
+    response = f"Формат ответа установлен: {fmt}"
+    await update.message.reply_text(response)
+    log_event(username, f"/format {fmt}", response)
 
 # ----------------------------
 # Основная функция запуска
 # ----------------------------
 if __name__ == "__main__":
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    from threading import Thread
+    from flask import Flask
+    import os
 
-    # Команды
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("prompt", handle_prompt))
-    app.add_handler(CommandHandler("format", handle_format))
+    def run_bot():
+        bot_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+        bot_app.add_handler(CommandHandler("start", start))
+        bot_app.add_handler(CommandHandler("prompt", handle_prompt))
+        bot_app.add_handler(CommandHandler("format", handle_format))
+        bot_app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_task))
+        logger.info("Бот запущен...")
+        bot_app.run_polling()
 
-    # Обработка текстовых сообщений и фото
-    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_task))
+    # Запускаем бота в отдельном потоке
+    Thread(target=run_bot, daemon=True).start()
 
-    logger.info("Бот запущен...")
-    app.run_polling()
+    # Flask-заглушка для Render (открывает порт)
+    flask_app = Flask(__name__)
+
+    @flask_app.route("/")
+    def index():
+        return "Bot is running!"
+
+    port = int(os.environ.get("PORT", 8080))
+    flask_app.run(host="0.0.0.0", port=port)
