@@ -189,28 +189,10 @@ async def handle_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Основная функция запуска
 # ----------------------------
 if __name__ == "__main__":
-    from threading import Thread
-    from flask import Flask
-    import os
-
-    def run_bot():
-        bot_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-        bot_app.add_handler(CommandHandler("start", start))
-        bot_app.add_handler(CommandHandler("prompt", handle_prompt))
-        bot_app.add_handler(CommandHandler("format", handle_format))
-        bot_app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_task))
-        logger.info("Бот запущен...")
-        bot_app.run_polling()
-
-    # Запускаем бота в отдельном потоке
-    Thread(target=run_bot, daemon=True).start()
-
-    # Flask-заглушка для Render (открывает порт)
-    flask_app = Flask(__name__)
-
-    @flask_app.route("/")
-    def index():
-        return "Bot is running!"
-
-    port = int(os.environ.get("PORT", 8080))
-    flask_app.run(host="0.0.0.0", port=port)
+    bot_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    bot_app.add_handler(CommandHandler("start", start))
+    bot_app.add_handler(CommandHandler("prompt", handle_prompt))
+    bot_app.add_handler(CommandHandler("format", handle_format))
+    bot_app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_task))
+    logger.info("Бот запущен...")
+    bot_app.run_polling()
