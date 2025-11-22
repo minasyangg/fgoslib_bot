@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, send_from_directory
 import redis
 import os
 import json
@@ -8,6 +8,12 @@ app = Flask(__name__)
 # Подключение к Redis
 redis_url = os.environ.get("UPSTASH_REDIS_URL")
 r = redis.Redis.from_url(redis_url, decode_responses=True)
+
+
+# Главная страница (монитор)
+@app.route('/')
+def index():
+    return send_from_directory('.', 'monitor.html')
 
 # Получить последние 100 логов
 @app.route('/logs')
