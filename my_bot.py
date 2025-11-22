@@ -17,7 +17,7 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 UPSTASH_REDIS_URL = os.environ["UPSTASH_REDIS_URL"]
 HF_API_URL = "https://hf.space/embed/mingg93/fgoslib-qwen3/api/predict/"
 HF_TOKEN = os.environ["HF_TOKEN"]
-REDIS_TTL = 900  # 15 минут
+REDIS_TTL = 900  # 14 минут
 
 # ----------------------------
 # Логи
