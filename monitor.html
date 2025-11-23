@@ -19,13 +19,8 @@
 <body>
   <div class="container">
     <h1>Telegram Bot Monitor</h1>
+    <button id="clearBtn" style="margin-bottom:18px; background:#e74c3c; color:#fff; border:none; padding:8px 18px; border-radius:5px; cursor:pointer;">Очистить логи</button>
     <ul class="log-list" id="logList">
-      <!-- Пример лога -->
-      <li class="log-item">
-        <span class="timestamp">2025-11-23 12:00</span><br>
-        <span class="user">@username</span>: <span class="cmd">/start</span>
-        <div class="response">Ответ: Привет! Я бот.</div>
-      </li>
       <!-- Здесь будут появляться новые логи -->
     </ul>
   </div>
@@ -49,6 +44,12 @@
         // Ошибки игнорируем
       }
     }
+    document.getElementById('clearBtn').onclick = async function() {
+      if (confirm('Удалить все логи?')) {
+        await fetch('/clear_logs', {method: 'POST'});
+        fetchLogs();
+      }
+    };
     setInterval(fetchLogs, 3000);
     fetchLogs();
   </script>
