@@ -18,6 +18,8 @@ import requests
 from telegram import Update, InputFile
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 import redis
+from flask import Flask
+import threading
 import logging
 
 from dotenv import load_dotenv
@@ -188,7 +190,19 @@ async def handle_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ----------------------------
 # Основная функция запуска
 # ----------------------------
-if __name__ == "__main__":
+
+# --- Flask HTTP server for Render health check ---
+app = Flask(__name__)
+
+@app.route("/")
+def health():
+    return "Bot is running!"
+
+def start_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+def run_bot():
     bot_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("prompt", handle_prompt))
@@ -196,3 +210,8 @@ if __name__ == "__main__":
     bot_app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_task))
     logger.info("Бот запущен...")
     bot_app.run_polling()
+
+if __name__ == "__main__":
+    flask_thread = threading.Thread(target=start_flask)
+    flask_thread.start()
+    run_bot()
