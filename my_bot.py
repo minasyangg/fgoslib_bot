@@ -19,6 +19,8 @@ import requests
 import markdown as md
 from jinja2 import Template
 import pyppeteer
+import urllib.parse
+import tempfile
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 import asyncio
@@ -110,10 +112,29 @@ async def render_html_to_pdf_bytes(html: str, paper_format: str = "A4") -> bytes
     """Render HTML to PDF bytes using headless Chromium (pyppeteer).
     This waits for network activity to finish so MathJax can render.
     """
-    browser = await pyppeteer.launch(options={"args": ["--no-sandbox", "--disable-setuid-sandbox"]})
+    logger.info("Starting headless Chromium for PDF rendering")
+    browser = await pyppeteer.launch(options={"args": ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]})
     try:
         page = await browser.newPage()
-        await page.setContent(html, waitUntil="networkidle0")
+        try:
+            # try setContent with a generous timeout
+            await page.setContent(html, waitUntil="networkidle0", timeout=60000)
+        except Exception as e:
+            logger.warning(f"page.setContent failed: {e}; trying data: URL fallback")
+            try:
+                data_url = "data:text/html;charset=utf-8," + urllib.parse.quote(html)
+                await page.goto(data_url, waitUntil="networkidle0", timeout=60000)
+            except Exception as e2:
+                logger.exception("Both setContent and data-URL goto failed")
+                raise
+
+        # If MathJax is present, request typesetting before printing
+        try:
+            await page.evaluate("() => { if (window.MathJax && MathJax.typesetPromise) { return MathJax.typesetPromise(); } }")
+        except Exception:
+            # ignore: evaluation may fail if MathJax not loaded yet
+            logger.debug("MathJax typeset call failed or not present; continuing to PDF generation")
+
         pdf_bytes = await page.pdf({"format": paper_format, "printBackground": True})
         return pdf_bytes
     finally:
