@@ -25,7 +25,14 @@
         <label>Bot username (без @): <input id="uiBot" style="width:220px;margin-left:8px" placeholder="my_bot"></label>
       </div>
       <div style="margin-top:8px">
-        <label>Task id (опционально): <input id="uiTaskId" style="width:220px;margin-left:8px" placeholder="оставьте пустым для генерации"></label>
+        <label>Task id (обязательно): <input id="uiTaskId" style="width:220px;margin-left:8px" placeholder="введите уникальный id"></label>
+      </div>
+      <div style="margin-top:8px">
+        <label>Промт (опционально):</label>
+        <input id="uiPrompt" style="width:100%;max-width:640px;padding:8px" placeholder="Дополнительный промт для обработки">
+      </div>
+      <div style="margin-top:8px">
+        <label>Формат вывода: <select id="uiFormat" style="margin-left:8px"><option value="md">Markdown (текст + изображения)</option><option value="md-table">Markdown (таблица)</option></select></label>
       </div>
       <div style="margin-top:8px">
         <label>Текст задачи:</label>
@@ -53,14 +60,18 @@
       const bot = document.getElementById('uiBot').value.trim();
       if (!bot) { alert('Укажите имя бота (без @)'); return; }
       let taskId = document.getElementById('uiTaskId').value.trim();
-      if (!taskId) taskId = genId();
+      if (!taskId) { alert('Task id обязателен. Пожалуйста, введите уникальный идентификатор.'); return; }
       const text = document.getElementById('uiText').value || '';
+      const prompt = document.getElementById('uiPrompt').value || '';
+      const outFormat = document.getElementById('uiFormat').value || 'md';
       const files = document.getElementById('uiFiles').files;
       const status = document.getElementById('createStatus');
       status.textContent = 'Создаю задачу...';
       const fd = new FormData();
       fd.append('task_id', taskId);
       fd.append('task_text', text);
+      fd.append('prompt', prompt);
+      fd.append('format', outFormat);
       for (let i=0;i<files.length;i++) fd.append('images', files[i]);
       try {
         const res = await fetch('/create_task', { method: 'POST', body: fd });

@@ -36,6 +36,8 @@ def create_task():
         # form fields
         task_id = request.form.get('task_id') or None
         task_text = request.form.get('task_text', '')
+        prompt = request.form.get('prompt', '')
+        out_format = request.form.get('format', 'md')
         # файлы
         files = request.files.getlist('images')
         for f in files:
@@ -56,13 +58,17 @@ def create_task():
         task_id = data.get('task_id')
         task_text = data.get('task_text', '')
         images = data.get('images', [])
+        prompt = data.get('prompt', '')
+        out_format = data.get('format', 'md')
 
     if not task_id:
         return jsonify({'error': 'task_id required'}), 400
 
     obj = {
         'task_text': task_text,
-        'images': images
+        'images': images,
+        'prompt': prompt,
+        'format': out_format
     }
     r.set(f"task:{task_id}", json.dumps(obj))
     return jsonify({'status': 'ok', 'task_id': task_id})
@@ -78,6 +84,40 @@ def get_task(task_id):
         return jsonify(json.loads(raw))
     except Exception:
         return jsonify({'raw': raw})
+
+
+@app.route('/task_image/<task_id>/<int:idx>')
+def task_image(task_id, idx):
+    """Return image binary for task images stored as data URLs or external URLs."""
+    raw = r.get(f"task:{task_id}") or r.get(task_id)
+    if not raw:
+        return jsonify({'error': 'not found'}), 404
+    try:
+        task_obj = json.loads(raw)
+    except Exception:
+        return jsonify({'error': 'invalid task data'}), 400
+    images = task_obj.get('images', [])
+    if idx < 0 or idx >= len(images):
+        return jsonify({'error': 'index out of range'}), 404
+    img = images[idx]
+    # If it's a data URL, decode and return
+    if isinstance(img, str) and img.startswith('data:'):
+        try:
+            header, b64 = img.split(',', 1)
+            # header like data:image/png;base64
+            mime = header.split(':', 1)[1].split(';', 1)[0]
+            import base64
+            data = base64.b64decode(b64)
+            from flask import Response
+            return Response(data, mimetype=mime)
+        except Exception:
+            return jsonify({'error': 'invalid data url'}), 400
+    # If it's an HTTP(S) URL, redirect
+    if isinstance(img, str) and (img.startswith('http://') or img.startswith('https://')):
+        from flask import redirect
+        return redirect(img)
+    # Fallback: return text/plain
+    return jsonify({'raw': img})
 
 # Очистить все логи
 @app.route('/clear_logs', methods=['POST'])

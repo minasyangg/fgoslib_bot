@@ -32,6 +32,7 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 UPSTASH_REDIS_URL = os.environ["UPSTASH_REDIS_URL"]
 HF_API_URL = "https://hf.space/embed/mingg93/fgoslib-qwen3/api/predict/"
 HF_TOKEN = os.environ["HF_TOKEN"]
+MONITOR_BASE_URL = os.environ.get("MONITOR_BASE_URL", "")
 REDIS_TTL = 900  # 14 минут
 
 # ----------------------------
@@ -112,11 +113,60 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 task_obj = json.loads(raw)
                 task_text = task_obj.get("task_text") or task_obj.get("text") or task_obj.get("content") or ""
                 images = task_obj.get("images", [])
+                prompt = task_obj.get("prompt", "")
+                out_format = task_obj.get("format", "md")
             except Exception:
                 task_text = raw
                 images = []
-            save_session(user_id, task_text, images)
-            response = f"Задача {task_id} загружена в сессию. Отправь /prompt для доп. промта или /format для выбора формата."
+                prompt = ""
+                out_format = "md"
+            # Сохраняем сессию
+            save_session(user_id, task_text, images, user_prompt=prompt, output_format=out_format)
+            # Записываем привязку task -> user
+            try:
+                r.set(f"task_assignee:{task_id}", user_id)
+                # также обновим объект задачи, добавив assigned_user_id
+                try:
+                    task_obj['assigned_user_id'] = user_id
+                    r.set(f"task:{task_id}", json.dumps(task_obj))
+                except Exception:
+                    pass
+            except Exception:
+                logger.exception('Не удалось записать привязку task->user в Redis')
+
+            # Формируем Markdown файл с текстом и изображениями (встраиваем data URLs)
+            md_lines = []
+            md_lines.append(f"# Задача {task_id}\n")
+            if prompt:
+                md_lines.append(f"**Промт:** {prompt}\n")
+            md_lines.append("## Текст задания:\n")
+            md_lines.append(task_text + "\n")
+            if images:
+                md_lines.append('\n## Изображения:\n')
+                for idx, img in enumerate(images):
+                    # Если задан MONITOR_BASE_URL — используем короткую ссылку к /task_image/
+                    if MONITOR_BASE_URL:
+                        base = MONITOR_BASE_URL.rstrip('/')
+                        img_url = f"{base}/task_image/{task_id}/{idx}"
+                        md_lines.append(f"![]({img_url})\n")
+                    else:
+                        # если изображение — data URL, вставляем как картинка
+                        if isinstance(img, str) and img.startswith('data:'):
+                            md_lines.append(f"![]({img})\n")
+                        elif isinstance(img, str) and img.startswith('http'):
+                            md_lines.append(f"![]({img})\n")
+                        else:
+                            # неизвестный формат — вставим ссылку/текст
+                            md_lines.append(f"- {img}\n")
+
+            md_content = "\n".join(md_lines)
+            try:
+                await update.message.reply_document(document=InputFile(io.BytesIO(md_content.encode('utf-8')), filename=f"task_{task_id}.md"))
+                response = f"Задача {task_id} загружена и отправлена вам в виде .md файла."
+            except Exception as e:
+                logger.exception('Ошибка отправки md файла')
+                response = f"Задача {task_id} загружена, но не удалось отправить файл: {e}"
+
             await update.message.reply_text(response)
             log_event(username, f"/start {task_id}", response)
             return
