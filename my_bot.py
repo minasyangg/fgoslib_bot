@@ -16,6 +16,9 @@ import json
 import io
 import time
 import requests
+import markdown as md
+from jinja2 import Template
+import pyppeteer
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 import asyncio
@@ -102,6 +105,23 @@ def call_hf_api(task_text, images=None, user_prompt="", output_format="md"):
     resp.raise_for_status()
     return resp.json()
 
+
+async def render_html_to_pdf_bytes(html: str, paper_format: str = "A4") -> bytes:
+    """Render HTML to PDF bytes using headless Chromium (pyppeteer).
+    This waits for network activity to finish so MathJax can render.
+    """
+    browser = await pyppeteer.launch(options={"args": ["--no-sandbox", "--disable-setuid-sandbox"]})
+    try:
+        page = await browser.newPage()
+        await page.setContent(html, waitUntil="networkidle0")
+        pdf_bytes = await page.pdf({"format": paper_format, "printBackground": True})
+        return pdf_bytes
+    finally:
+        try:
+            await browser.close()
+        except Exception:
+            pass
+
 # ----------------------------
 # Команды бота
 # ----------------------------
@@ -169,12 +189,44 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             md_lines.append(f"- {img}\n")
 
             md_content = "\n".join(md_lines)
+            # Convert markdown -> HTML and render to PDF (MathJax enabled) using headless Chromium
+            title = f"Задача {task_obj.get('real_id') or task_id}"
             try:
-                await update.message.reply_document(document=InputFile(io.BytesIO(md_content.encode('utf-8')), filename=f"task_{task_id}.md"))
-                response = f"Задача {task_obj.get('real_id') or task_id} загружена и отправлена вам в виде .md файла."
+                html_body = md.markdown(md_content, extensions=['extra', 'tables'])
+            except Exception:
+                # fallback: wrap raw md in pre
+                html_body = f"<pre>{md_content}</pre>"
+
+            html_template = f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{title}</title>
+  <style>
+    body{{font-family: DejaVu Sans, Arial, sans-serif; padding:20px;}}
+    img{{max-width:100%;height:auto;}}
+    pre{{white-space:pre-wrap;}}
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+</head>
+<body>
+{html_body}
+</body>
+</html>"""
+
+            try:
+                pdf_bytes = await render_html_to_pdf_bytes(html_template)
+                await update.message.reply_document(document=InputFile(io.BytesIO(pdf_bytes), filename=f"task_{task_obj.get('real_id') or task_id}.pdf"))
+                response = f"Задача {task_obj.get('real_id') or task_id} загружена и отправлена вам в виде PDF."
             except Exception as e:
-                logger.exception('Ошибка отправки md файла')
-                response = f"Задача {task_obj.get('real_id') or task_id} загружена, но не удалось отправить файл: {e}"
+                logger.exception('Ошибка отправки PDF файла')
+                # fallback: send .md file if PDF generation fails
+                try:
+                    await update.message.reply_document(document=InputFile(io.BytesIO(md_content.encode('utf-8')), filename=f"task_{task_id}.md"))
+                    response = f"Задача {task_obj.get('real_id') or task_id} загружена, отправлена как .md (PDF failed): {e}"
+                except Exception:
+                    response = f"Задача {task_obj.get('real_id') or task_id} загружена, но не удалось отправить файл: {e}"
 
             # Кнопки: Решить / Удалить
             try:
@@ -283,19 +335,7 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(response)
         log_event(username, f"/prompt {prompt}", response)
 
-async def handle_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    username = update.message.from_user.username or str(user_id)
-    fmt = " ".join(context.args).lower()
-    if fmt not in ["md", "pdf"]:
-        response = "Используй /format md или /format pdf"
-        await update.message.reply_text(response)
-        log_event(username, f"/format {fmt}", response)
-        return
-    update_format(user_id, fmt)
-    response = f"Формат ответа установлен: {fmt}"
-    await update.message.reply_text(response)
-    log_event(username, f"/format {fmt}", response)
+
 
 async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -385,7 +425,6 @@ def run_bot():
     bot_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("prompt", handle_prompt))
-    bot_app.add_handler(CommandHandler("format", handle_format))
     bot_app.add_handler(CallbackQueryHandler(callback_query_handler))
     bot_app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_task))
     logger.info("Бот запущен...")
