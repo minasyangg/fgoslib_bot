@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Test Telegram Open</title>
+  <style>
+    body{font-family:Arial,Helvetica,sans-serif;padding:20px}
+    label{display:block;margin:8px 0}
+    input{width:100%;max-width:420px;padding:8px}
+    button{margin-top:12px;padding:8px 12px}
+  </style>
+</head>
+<body>
+  <h3>Тест открытия Telegram с taskId</h3>
+  <p>Заполните имя бота (без @) и taskId, сгенерированный сайтом Hugo.</p>
+  <label>Bot username (без @): <input id="bot" value="BOT_USERNAME"></label>
+  <label>Task id: <input id="tid" value="TASK_ID"></label>
+  <button id="open">Open bot with TASK_ID</button>
+
+  <script>
+    document.getElementById('open').addEventListener('click', () => {
+      const bot = document.getElementById('bot').value.trim();
+      const tid = document.getElementById('tid').value.trim();
+      if (!bot || !tid) { alert('Заполните поля'); return; }
+      const url = 'https://t.me/' + encodeURIComponent(bot) + '?start=' + encodeURIComponent(tid);
+      window.open(url, '_blank');
+    });
+  </script>
+</body>
+</html>

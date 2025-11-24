@@ -100,6 +100,32 @@ def call_hf_api(task_text, images=None, user_prompt="", output_format="md"):
 # Команды бота
 # ----------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    username = update.message.from_user.username or str(user_id)
+    # Если приходит аргумент (taskId) — пробуем загрузить задачу из Redis
+    if context.args:
+        task_id = context.args[0]
+        # Поддерживаем два варианта ключа: task:<id> и просто <id>
+        raw = r.get(f"task:{task_id}") or r.get(task_id)
+        if raw:
+            try:
+                task_obj = json.loads(raw)
+                task_text = task_obj.get("task_text") or task_obj.get("text") or task_obj.get("content") or ""
+                images = task_obj.get("images", [])
+            except Exception:
+                task_text = raw
+                images = []
+            save_session(user_id, task_text, images)
+            response = f"Задача {task_id} загружена в сессию. Отправь /prompt для доп. промта или /format для выбора формата."
+            await update.message.reply_text(response)
+            log_event(username, f"/start {task_id}", response)
+            return
+        else:
+            response = f"Задача {task_id} не найдена. Проверьте taskId на стороне сайта."
+            await update.message.reply_text(response)
+            log_event(username, f"/start {task_id}", response)
+            return
+
     await update.message.reply_text(
         "Привет! Отправь задание (текст + изображения), а затем /prompt <текст> для доп. промта.\n"
         "Чтобы выбрать формат ответа, используй /format md или /format pdf."
