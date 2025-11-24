@@ -14,9 +14,11 @@ def log_event(username, command, response):
 import os
 import json
 import io
+import time
 import requests
-from telegram import Update, InputFile
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+import asyncio
 import redis
 from flask import Flask
 import threading
@@ -49,13 +51,16 @@ r = redis.Redis.from_url(UPSTASH_REDIS_URL, decode_responses=True)
 # ----------------------------
 # Функции работы с сессией
 # ----------------------------
-def save_session(user_id, task_text, images=None, user_prompt=None, output_format="md"):
+def save_session(user_id, task_text, images=None, user_prompt=None, output_format="md", username=None, task_ids=None):
     key = f"session:{user_id}"
     data = {
+        "user_id": user_id,
+        "username": username or "",
         "task_text": task_text,
         "images": images or [],
         "user_prompt": user_prompt or "",
-        "output_format": output_format
+        "output_format": output_format,
+        "task_ids": task_ids or []
     }
     r.set(key, json.dumps(data), ex=REDIS_TTL)
     logger.info(f"Saved session for user {user_id}: {data}")
@@ -120,8 +125,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 images = []
                 prompt = ""
                 out_format = "md"
-            # Сохраняем сессию
-            save_session(user_id, task_text, images, user_prompt=prompt, output_format=out_format)
+            # Сохраняем сессию (включая username) и добавляем task_id в session.task_ids (append без дубликатов)
+            existing = load_session(user_id) or {}
+            task_ids = existing.get('task_ids', []) if isinstance(existing, dict) else []
+            if task_id not in task_ids:
+                task_ids.append(task_id)
+            save_session(user_id, task_text, images, user_prompt=prompt, output_format=out_format, username=username, task_ids=task_ids)
             # Записываем привязку task -> user
             try:
                 r.set(f"task_assignee:{task_id}", user_id)
@@ -162,12 +171,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             md_content = "\n".join(md_lines)
             try:
                 await update.message.reply_document(document=InputFile(io.BytesIO(md_content.encode('utf-8')), filename=f"task_{task_id}.md"))
-                response = f"Задача {task_id} загружена и отправлена вам в виде .md файла."
+                response = f"Задача {task_obj.get('real_id') or task_id} загружена и отправлена вам в виде .md файла."
             except Exception as e:
                 logger.exception('Ошибка отправки md файла')
-                response = f"Задача {task_id} загружена, но не удалось отправить файл: {e}"
+                response = f"Задача {task_obj.get('real_id') or task_id} загружена, но не удалось отправить файл: {e}"
 
-            await update.message.reply_text(response)
+            # Кнопки: Решить / Удалить
+            try:
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("Решить", callback_data=f"solve:{task_id}"), InlineKeyboardButton("Удалить", callback_data=f"del:{task_id}")]])
+                await update.message.reply_text(response, reply_markup=kb)
+            except Exception:
+                await update.message.reply_text(response)
+
             log_event(username, f"/start {task_id}", response)
             return
         else:
@@ -196,8 +211,27 @@ async def handle_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for photo in update.message.photo:
             images.append(photo.file_id)
 
-    save_session(user_id, task_text, images)
-    response = "Задание сохранено! Добавь /prompt если хочешь дать дополнительный промт."
+    # Создаём локальную задачу и сохраняем её под ключом task:<local_id>
+    local_task_id = f"local-{user_id}-{int(time.time())}"
+    task_obj = {
+        'task_text': task_text,
+        'images': images,
+        'prompt': '',
+        'format': 'md',
+        'real_id': ''
+    }
+    try:
+        r.set(f"task:{local_task_id}", json.dumps(task_obj))
+    except Exception:
+        logger.exception('Ошибка записи локальной задачи в Redis')
+
+    # Сохраняем сессию и добавляем локальный task_id в session.task_ids (append без дубликатов)
+    existing = load_session(user_id) or {}
+    task_ids = existing.get('task_ids', []) if isinstance(existing, dict) else []
+    if local_task_id not in task_ids:
+        task_ids.append(local_task_id)
+    save_session(user_id, task_text, images, username=username, task_ids=task_ids)
+    response = f"Локальная задача сохранена под id {local_task_id}. Добавь /prompt если хочешь дать дополнительный промт."
     await update.message.reply_text(response)
     log_event(username, task_text or "[photo]", response)
 
@@ -263,6 +297,75 @@ async def handle_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(response)
     log_event(username, f"/format {fmt}", response)
 
+async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+    user = query.from_user
+    username = user.username or str(user.id)
+
+    if data.startswith('solve:'):
+        task_id = data.split(':',1)[1]
+        raw = r.get(f"task:{task_id}") or r.get(task_id)
+        if not raw:
+            await query.edit_message_text('Задача не найдена.')
+            return
+        try:
+            task_obj = json.loads(raw)
+        except Exception:
+            await query.edit_message_text('Неверные данные задачи.')
+            return
+
+        await query.edit_message_text('Запускаю генерацию (HF)...')
+        # Вызов HF в отдельном потоке
+        try:
+            result = await asyncio.to_thread(call_hf_api, task_obj.get('task_text',''), task_obj.get('images',[]), task_obj.get('prompt',''), task_obj.get('format','md'))
+        except Exception as e:
+            logger.exception('Ошибка при обращении к HF API')
+            await context.bot.send_message(chat_id=query.message.chat_id, text=f'Ошибка при генерации: {e}')
+            log_event(username, f"solve {task_id}", f"error: {e}")
+            return
+
+        # Сохраним результат
+        try:
+            r.set(f"task_result:{task_id}", json.dumps(result))
+        except Exception:
+            pass
+
+        # Отправляем результат пользователю
+        try:
+            if isinstance(result, dict) and 'text' in result:
+                await context.bot.send_message(chat_id=query.message.chat_id, text=result['text'])
+                log_event(username, f"solve {task_id}", result['text'])
+            elif isinstance(result, dict) and 'pdf' in result:
+                pdf_url = result['pdf']
+                pdf_bytes = requests.get(pdf_url).content
+                await context.bot.send_document(chat_id=query.message.chat_id, document=InputFile(io.BytesIO(pdf_bytes), filename='solution.pdf'))
+                log_event(username, f"solve {task_id}", '[PDF sent]')
+            else:
+                await context.bot.send_message(chat_id=query.message.chat_id, text=str(result))
+                log_event(username, f"solve {task_id}", str(result))
+        except Exception as e:
+            logger.exception('Ошибка отправки результата')
+            await context.bot.send_message(chat_id=query.message.chat_id, text=f'Ошибка отправки результата: {e}')
+
+    elif data.startswith('del:'):
+        task_id = data.split(':',1)[1]
+        # Удаляем ключи
+        try:
+            r.delete(f"task:{task_id}")
+            r.delete(f"task_assignee:{task_id}")
+            r.delete(f"task_result:{task_id}")
+            # также можно удалить session, если нужно
+            await query.edit_message_text('Задача удалена.')
+            await context.bot.send_message(chat_id=query.message.chat_id, text=f'Задача {task_id} удалена.')
+            log_event(username, f"delete {task_id}", 'deleted')
+        except Exception as e:
+            logger.exception('Ошибка удаления задачи')
+            await query.edit_message_text(f'Ошибка при удалении: {e}')
+            log_event(username, f"delete {task_id}", f'error: {e}')
+    else:
+        await query.edit_message_text('Неизвестное действие.')
 # ----------------------------
 # Основная функция запуска
 # ----------------------------
@@ -283,6 +386,7 @@ def run_bot():
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("prompt", handle_prompt))
     bot_app.add_handler(CommandHandler("format", handle_format))
+    bot_app.add_handler(CallbackQueryHandler(callback_query_handler))
     bot_app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_task))
     logger.info("Бот запущен...")
     bot_app.run_polling()

@@ -38,6 +38,7 @@ def create_task():
         task_text = request.form.get('task_text', '')
         prompt = request.form.get('prompt', '')
         out_format = request.form.get('format', 'md')
+        real_id = request.form.get('real_id', '')
         # файлы
         files = request.files.getlist('images')
         for f in files:
@@ -60,6 +61,7 @@ def create_task():
         images = data.get('images', [])
         prompt = data.get('prompt', '')
         out_format = data.get('format', 'md')
+        real_id = data.get('real_id', '')
 
     if not task_id:
         return jsonify({'error': 'task_id required'}), 400
@@ -68,7 +70,8 @@ def create_task():
         'task_text': task_text,
         'images': images,
         'prompt': prompt,
-        'format': out_format
+        'format': out_format,
+        'real_id': real_id
     }
     r.set(f"task:{task_id}", json.dumps(obj))
     return jsonify({'status': 'ok', 'task_id': task_id})

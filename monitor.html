@@ -25,7 +25,10 @@
         <label>Bot username (без @): <input id="uiBot" style="width:220px;margin-left:8px" placeholder="my_bot"></label>
       </div>
       <div style="margin-top:8px">
-        <label>Task id (обязательно): <input id="uiTaskId" style="width:220px;margin-left:8px" placeholder="введите уникальный id"></label>
+        <label>Task id (обязательно, внутр. id): <input id="uiTaskId" style="width:220px;margin-left:8px" placeholder="введите уникальный id"></label>
+      </div>
+      <div style="margin-top:8px">
+        <label>Номер задания (реальный номер для пользователя): <input id="uiRealId" style="width:220px;margin-left:8px" placeholder="например 42"></label>
       </div>
       <div style="margin-top:8px">
         <label>Промт (опционально):</label>
@@ -62,6 +65,7 @@
       let taskId = document.getElementById('uiTaskId').value.trim();
       if (!taskId) { alert('Task id обязателен. Пожалуйста, введите уникальный идентификатор.'); return; }
       const text = document.getElementById('uiText').value || '';
+      const realId = document.getElementById('uiRealId').value.trim() || '';
       const prompt = document.getElementById('uiPrompt').value || '';
       const outFormat = document.getElementById('uiFormat').value || 'md';
       const files = document.getElementById('uiFiles').files;
@@ -69,6 +73,7 @@
       status.textContent = 'Создаю задачу...';
       const fd = new FormData();
       fd.append('task_id', taskId);
+      fd.append('real_id', realId);
       fd.append('task_text', text);
       fd.append('prompt', prompt);
       fd.append('format', outFormat);
