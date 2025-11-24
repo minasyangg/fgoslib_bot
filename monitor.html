@@ -19,12 +19,65 @@
 <body>
   <div class="container">
     <h1>Telegram Bot Monitor</h1>
+    <div style="margin-bottom:18px;padding:12px;border:1px solid #eee;border-radius:6px;background:#fbfbfc">
+      <strong>Создать тестовую задачу и открыть бота</strong>
+      <div style="margin-top:8px">
+        <label>Bot username (без @): <input id="uiBot" style="width:220px;margin-left:8px" placeholder="my_bot"></label>
+      </div>
+      <div style="margin-top:8px">
+        <label>Task id (опционально): <input id="uiTaskId" style="width:220px;margin-left:8px" placeholder="оставьте пустым для генерации"></label>
+      </div>
+      <div style="margin-top:8px">
+        <label>Текст задачи:</label>
+        <textarea id="uiText" rows="3" style="width:100%;max-width:640px;padding:8px" placeholder="Опишите задание для теста"></textarea>
+      </div>
+      <div style="margin-top:8px">
+        <label>Изображения (опционально): <input id="uiFiles" type="file" multiple accept="image/*"></label>
+      </div>
+      <div style="margin-top:10px">
+        <button id="createOpen" style="padding:8px 12px;background:#2d6cdf;color:#fff;border:none;border-radius:6px;cursor:pointer">Создать и открыть в Telegram</button>
+        <span id="createStatus" style="margin-left:12px;color:#2d6cdf"></span>
+      </div>
+    </div>
     <button id="clearBtn" style="margin-bottom:18px; background:#e74c3c; color:#fff; border:none; padding:8px 18px; border-radius:5px; cursor:pointer;">Очистить логи</button>
     <ul class="log-list" id="logList">
       <!-- Здесь будут появляться новые логи -->
     </ul>
   </div>
   <script>
+    function genId() {
+      return 't' + Date.now().toString(36) + Math.random().toString(36).slice(2,8);
+    }
+
+    document.getElementById('createOpen').addEventListener('click', async function(){
+      const bot = document.getElementById('uiBot').value.trim();
+      if (!bot) { alert('Укажите имя бота (без @)'); return; }
+      let taskId = document.getElementById('uiTaskId').value.trim();
+      if (!taskId) taskId = genId();
+      const text = document.getElementById('uiText').value || '';
+      const files = document.getElementById('uiFiles').files;
+      const status = document.getElementById('createStatus');
+      status.textContent = 'Создаю задачу...';
+      const fd = new FormData();
+      fd.append('task_id', taskId);
+      fd.append('task_text', text);
+      for (let i=0;i<files.length;i++) fd.append('images', files[i]);
+      try {
+        const res = await fetch('/create_task', { method: 'POST', body: fd });
+        const j = await res.json();
+        if (res.ok && j.task_id) {
+          status.textContent = 'Готово — открываю Telegram...';
+          const url = 'https://t.me/' + encodeURIComponent(bot) + '?start=' + encodeURIComponent(j.task_id);
+          window.open(url, '_blank');
+          setTimeout(()=>{ status.textContent = ''; }, 3000);
+        } else {
+          status.textContent = 'Ошибка: ' + (j.error||JSON.stringify(j));
+        }
+      } catch (e) {
+        status.textContent = 'Ошибка сети';
+      }
+    });
+
     async function fetchLogs() {
       try {
         const res = await fetch('/logs');

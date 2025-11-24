@@ -116,7 +116,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 task_text = raw
                 images = []
             save_session(user_id, task_text, images)
-            response = f"Задаа {task_id} загружена в сессию. Отправь /prompt для доп. промта или /format для выбора формата."
+            response = f"Задача {task_id} загружена в сессию. Отправь /prompt для доп. промта или /format для выбора формата."
             await update.message.reply_text(response)
             log_event(username, f"/start {task_id}", response)
             return
