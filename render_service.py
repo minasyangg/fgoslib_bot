@@ -32,6 +32,7 @@ import requests
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 import markdown as md
+from aiohttp import web
 
 from playwright.async_api import async_playwright
 
@@ -84,8 +85,8 @@ def build_html(task_obj: dict) -> str:
     except Exception:
         body = f"<pre>{text}</pre>"
 
-        # Build HTML without using an f-string to avoid brace-escaping issues
-        head = ("""<!doctype html>
+    # Build HTML without using an f-string to avoid brace-escaping issues
+    head = ("""<!doctype html>
 <html>
 <head>
     <meta charset="utf-8" />
@@ -99,8 +100,8 @@ def build_html(task_obj: dict) -> str:
 <body>
 """)
 
-        # JS snippet: use normal JS braces (no doubling) since we are not in an f-string
-        js = ("""
+    # JS snippet: use normal JS braces (no doubling) since we are not in an f-string
+    js = ("""
 <script>
 document.addEventListener('DOMContentLoaded', ()=>{
     if (window.renderMathInElement) {
@@ -112,7 +113,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
 </script>
 """)
 
-        html = head + body + js + "\n</body>\n</html>"
+    html = head + body + js + "\n</body>\n</html>"
     return html
 
 async def render_task(task_id: str):
@@ -235,10 +236,43 @@ async def worker_loop():
             logger.exception('Worker loop error')
             await asyncio.sleep(1)
 
-def main():
+async def start_services():
     # Ensure Playwright browsers are installed when running container
     logger.info('Starting render service')
-    asyncio.run(worker_loop())
+
+    # start background worker
+    worker_task = asyncio.create_task(worker_loop())
+
+    # small HTTP server for Render health checks and basic status
+    async def health(request):
+        return web.Response(text='OK')
+
+    app = web.Application()
+    app.add_routes([web.get('/', health), web.get('/health', health)])
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get('PORT', os.environ.get('HTTP_PORT', '8080')))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info('HTTP server listening on port %s', port)
+
+    try:
+        # keep main alive while worker runs
+        while True:
+            await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        logger.info('Shutdown requested')
+    finally:
+        worker_task.cancel()
+        try:
+            await worker_task
+        except Exception:
+            pass
+        await runner.cleanup()
+
+def main():
+    asyncio.run(start_services())
 
 if __name__ == '__main__':
     main()

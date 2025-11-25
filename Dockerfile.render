@@ -36,4 +36,8 @@ COPY render_service.py ./
 
 ENV PYTHONUNBUFFERED=1
 
+# Render.com expects web services to bind to a port. Default to 8080.
+ENV PORT=8080
+EXPOSE 8080
+
 CMD ["python", "render_service.py"]
