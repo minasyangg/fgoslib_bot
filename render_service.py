@@ -84,22 +84,35 @@ def build_html(task_obj: dict) -> str:
     except Exception:
         body = f"<pre>{text}</pre>"
 
-    html = f"""<!doctype html>
+        # Build HTML without using an f-string to avoid brace-escaping issues
+        head = ("""<!doctype html>
 <html>
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Task</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js"></script>
-  <style>body{{font-family: DejaVu Sans, Arial, sans-serif; padding:20px;}} img{{max-width:100%; height:auto;}} pre{{white-space:pre-wrap;}}</style>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Task</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js"></script>
+    <style>body{font-family: DejaVu Sans, Arial, sans-serif; padding:20px;} img{max-width:100%; height:auto;} pre{white-space:pre-wrap;}</style>
 </head>
 <body>
-{body}
-<script>document.addEventListener('DOMContentLoaded', ()=>{{ if(window.renderMathInElement){{ try{{renderMathInElement(document.body, {{delimiters: [{{left:'$$', right:'$$', display:true}},{{left:'$', right:'$', display:false}}]}})} }}catch(e){{console.error(e)}} }}}});</script>
-</body>
-</html>"""
+""")
+
+        # JS snippet: use normal JS braces (no doubling) since we are not in an f-string
+        js = ("""
+<script>
+document.addEventListener('DOMContentLoaded', ()=>{
+    if (window.renderMathInElement) {
+        try {
+            renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});
+        } catch(e) { console.error(e); }
+    }
+});
+</script>
+""")
+
+        html = head + body + js + "\n</body>\n</html>"
     return html
 
 async def render_task(task_id: str):
