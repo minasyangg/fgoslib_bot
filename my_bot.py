@@ -21,6 +21,11 @@ from jinja2 import Template
 import pyppeteer
 import urllib.parse
 import tempfile
+import base64
+
+# Global browser instance + lock for reuse
+BROWSER = None
+BROWSER_LOCK = None
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 import asyncio
@@ -112,8 +117,18 @@ async def render_html_to_pdf_bytes(html: str, paper_format: str = "A4") -> bytes
     """Render HTML to PDF bytes using headless Chromium (pyppeteer).
     This waits for network activity to finish so MathJax can render.
     """
-    logger.info("Starting headless Chromium for PDF rendering")
-    browser = await pyppeteer.launch(options={"args": ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]})
+    global BROWSER, BROWSER_LOCK
+    if BROWSER_LOCK is None:
+        # lazy-init lock in running loop
+        BROWSER_LOCK = asyncio.Lock()
+
+    # reuse browser where possible to avoid launch overhead
+    async with BROWSER_LOCK:
+        if BROWSER is None:
+            logger.info("Launching shared Chromium instance for PDF rendering")
+            BROWSER = await pyppeteer.launch(options={"args": ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]})
+
+    browser = BROWSER
     try:
         page = await browser.newPage()
         try:
@@ -139,7 +154,8 @@ async def render_html_to_pdf_bytes(html: str, paper_format: str = "A4") -> bytes
         return pdf_bytes
     finally:
         try:
-            await browser.close()
+            # close only the page; keep the browser running for reuse
+            await page.close()
         except Exception:
             pass
 
@@ -236,10 +252,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 </body>
 </html>"""
 
+            # Check Redis cache for pre-generated PDF
+            cache_key = f"task_pdf:{task_id}"
             try:
-                pdf_bytes = await render_html_to_pdf_bytes(html_template)
-                await update.message.reply_document(document=InputFile(io.BytesIO(pdf_bytes), filename=f"task_{task_obj.get('real_id') or task_id}.pdf"))
-                response = f"Задача {task_obj.get('real_id') or task_id} загружена и отправлена вам в виде PDF."
+                cached = r.get(cache_key)
+            except Exception:
+                cached = None
+
+            try:
+                if cached:
+                    pdf_bytes = base64.b64decode(cached)
+                    await update.message.reply_document(document=InputFile(io.BytesIO(pdf_bytes), filename=f"task_{task_obj.get('real_id') or task_id}.pdf"))
+                    response = f"Задача {task_obj.get('real_id') or task_id} загружена (из кеша) и отправлена вам в виде PDF."
+                else:
+                    pdf_bytes = await render_html_to_pdf_bytes(html_template)
+                    # store in redis base64-encoded to serve next time
+                    try:
+                        b64 = base64.b64encode(pdf_bytes).decode('ascii')
+                        r.set(cache_key, b64, ex=REDIS_TTL * 6)
+                    except Exception:
+                        logger.exception('Не удалось сохранить PDF в кэш Redis')
+                    await update.message.reply_document(document=InputFile(io.BytesIO(pdf_bytes), filename=f"task_{task_obj.get('real_id') or task_id}.pdf"))
+                    response = f"Задача {task_obj.get('real_id') or task_id} загружена и отправлена вам в виде PDF."
+            except Exception as e:
+                logger.exception('Ошибка отправки PDF файла')
+                # fallback: send .md file if PDF generation fails
+                try:
+                    await update.message.reply_document(document=InputFile(io.BytesIO(md_content.encode('utf-8')), filename=f"task_{task_id}.md"))
+                    response = f"Задача {task_obj.get('real_id') or task_id} загружена, отправлена как .md (PDF failed): {e}"
+                except Exception:
+                    response = f"Задача {task_obj.get('real_id') or task_id} загружена, но не удалось отправить файл: {e}"
             except Exception as e:
                 logger.exception('Ошибка отправки PDF файла')
                 # fallback: send .md file if PDF generation fails
