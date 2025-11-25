@@ -86,19 +86,20 @@ def build_html(task_obj: dict) -> str:
         body = f"<pre>{text}</pre>"
 
     # Build HTML without using an f-string to avoid brace-escaping issues
+    port_str = os.environ.get('PORT', os.environ.get('HTTP_PORT', '8080'))
+    base_url = 'http://127.0.0.1:' + port_str
     head = ("""<!doctype html>
 <html>
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Task</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
-    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js"></script>
-    <style>body{font-family: DejaVu Sans, Arial, sans-serif; padding:20px;} img{max-width:100%; height:auto;} pre{white-space:pre-wrap;}</style>
-</head>
-<body>
 """)
+    # reference local KaTeX resources served from /static/
+    head += "\n    <link rel=\"stylesheet\" href=\"" + base_url + "/static/katex/katex.min.css\">"
+    head += "\n    <script defer src=\"" + base_url + "/static/katex/katex.min.js\"></script>"
+    head += "\n    <script defer src=\"" + base_url + "/static/katex/contrib/auto-render.min.js\"></script>"
+    head += "\n    <style>body{font-family: DejaVu Sans, Arial, sans-serif; padding:20px;} img{max-width:100%; height:auto;} pre{white-space:pre-wrap;}</style>\n</head>\n<body>"
 
     # JS snippet: use normal JS braces (no doubling) since we are not in an f-string
     js = ("""
@@ -138,10 +139,17 @@ async def render_task(task_id: str):
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(args=['--no-sandbox', '--disable-setuid-sandbox'])
-        page = await browser.new_page(viewport={'width': 1024, 'height': 1200})
+        # create a context with higher device scale for sharper screenshots
+        context = await browser.new_context(viewport={'width': 1024, 'height': 1200}, device_scale_factor=2)
+        page = await context.new_page()
         try:
             await page.set_content(html, wait_until='networkidle')
-            # Give KaTeX a moment to render
+            # Wait for KaTeX auto-render to finish (if present)
+            try:
+                await page.wait_for_selector('.katex', timeout=3000)
+            except Exception:
+                pass
+            # Give KaTeX a moment to render as a fallback
             try:
                 await page.evaluate('''() => { if (window.renderMathInElement) { return true; } }''')
             except Exception:
@@ -186,6 +194,10 @@ async def render_task(task_id: str):
         finally:
             try:
                 await page.close()
+            except Exception:
+                pass
+            try:
+                await context.close()
             except Exception:
                 pass
             try:
@@ -255,6 +267,8 @@ async def start_services():
         return web.Response(text='OK')
 
     app = web.Application()
+    # serve local static files (e.g. KaTeX resources) from ./static
+    app.router.add_static('/static/', path='./static', show_index=False)
     app.add_routes([web.get('/', health), web.get('/health', health)])
 
     runner = web.AppRunner(app)
