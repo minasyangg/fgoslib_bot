@@ -20,6 +20,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	libx11-6 \
 	libxcomposite1 \
 	libxrandr2 \
+	libxdamage1 \
+	libxfixes3 \
+	libxkbcommon0 \
+	libxshmfence1 \
 	libfontconfig1 \
 	fonts-liberation \
 	&& rm -rf /var/lib/apt/lists/*
