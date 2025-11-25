@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""
+Render worker service.
+
+Listens on Redis `render_queue` (BRPOP) for task ids.
+For each task it:
+ - loads `task:<id>` from Redis
+ - builds HTML (from markdown) and injects KaTeX for math rendering
+ - renders to PNG if content fits single page, otherwise renders PDF
+ - uploads result to S3 (if configured) or stores base64 in Redis under `task_png:<id>`/`task_pdf:<id>`
+ - notifies Telegram user if `task_assignee:<id>` exists by sending the file via Bot API
+
+Environment variables:
+ - UPSTASH_REDIS_URL (required)
+ - TELEGRAM_TOKEN (optional, for sending files)
+ - S3_BUCKET, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_ENDPOINT (optional)
+ - REDIS_TTL (seconds for stored keys, default 600)
+
+Run in Docker image that has Playwright browsers installed (Dockerfile.render provided).
+"""
+
+import os
+import time
+import base64
+import json
+import logging
+import asyncio
+from typing import Optional
+
+import redis
+import requests
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
+import markdown as md
+
+from playwright.async_api import async_playwright
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger('render_service')
+
+UPSTASH_REDIS_URL = os.environ.get('UPSTASH_REDIS_URL')
+if not UPSTASH_REDIS_URL:
+    raise RuntimeError('UPSTASH_REDIS_URL is required')
+
+r = redis.Redis.from_url(UPSTASH_REDIS_URL, decode_responses=False)
+REDIS_TTL = int(os.environ.get('REDIS_TTL', '600'))
+
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+
+# Optional S3 config
+S3_BUCKET = os.environ.get('S3_BUCKET')
+S3_ENDPOINT = os.environ.get('S3_ENDPOINT')  # e.g. https://s3.amazonaws.com or DO Spaces endpoint
+AWS_KEY = os.environ.get('AWS_ACCESS_KEY_ID')
+AWS_SECRET = os.environ.get('AWS_SECRET_ACCESS_KEY')
+
+def s3_client():
+    if not S3_BUCKET:
+        return None
+    kwargs = {}
+    if S3_ENDPOINT:
+        kwargs['endpoint_url'] = S3_ENDPOINT
+    return boto3.client('s3', aws_access_key_id=AWS_KEY, aws_secret_access_key=AWS_SECRET, **kwargs)
+
+def upload_to_s3(bytes_data: bytes, key: str, content_type: str) -> Optional[str]:
+    client = s3_client()
+    if client is None:
+        return None
+    try:
+        client.put_object(Bucket=S3_BUCKET, Key=key, Body=bytes_data, ContentType=content_type)
+        # build URL
+        if S3_ENDPOINT:
+            return f"{S3_ENDPOINT.rstrip('/')}/{S3_BUCKET}/{key}"
+        else:
+            return f"https://{S3_BUCKET}.s3.amazonaws.com/{key}"
+    except (BotoCoreError, ClientError) as e:
+        logger.exception('S3 upload failed')
+        return None
+
+def build_html(task_obj: dict) -> str:
+    """Return an HTML document string with KaTeX included for client-side math rendering."""
+    text = task_obj.get('task_text', '') or ''
+    try:
+        body = md.markdown(text, extensions=['extra', 'tables'])
+    except Exception:
+        body = f"<pre>{text}</pre>"
+
+    html = f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Task</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js"></script>
+  <style>body{{font-family: DejaVu Sans, Arial, sans-serif; padding:20px;}} img{{max-width:100%; height:auto;}} pre{{white-space:pre-wrap;}}</style>
+</head>
+<body>
+{body}
+<script>document.addEventListener('DOMContentLoaded', ()=>{{ if(window.renderMathInElement){{ try{{renderMathInElement(document.body, {{delimiters: [{{left:'$$', right:'$$', display:true}},{{left:'$', right:'$', display:false}}]}})} }}catch(e){{console.error(e)}} }}}});</script>
+</body>
+</html>"""
+    return html
+
+async def render_task(task_id: str):
+    raw = r.get(f"task:{task_id}")
+    if not raw:
+        logger.warning('Task %s not found in Redis', task_id)
+        return
+    try:
+        task_obj = json.loads(raw.decode('utf-8'))
+    except Exception:
+        logger.exception('Failed to parse task JSON')
+        return
+
+    html = build_html(task_obj)
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(args=['--no-sandbox', '--disable-setuid-sandbox'])
+        page = await browser.new_page(viewport={'width': 1024, 'height': 1200})
+        try:
+            await page.set_content(html, wait_until='networkidle')
+            # Give KaTeX a moment to render
+            try:
+                await page.evaluate('''() => { if (window.renderMathInElement) { return true; } }''')
+            except Exception:
+                pass
+
+            # measure page height to decide PNG vs PDF
+            scroll_height = await page.evaluate('() => document.body.scrollHeight')
+            logger.info('Task %s scrollHeight=%s', task_id, scroll_height)
+
+            # heuristic: if content fits in one viewport (~1200px) → PNG, else PDF
+            if scroll_height <= 1400:
+                logger.info('Rendering task %s as PNG', task_id)
+                png_bytes = await page.screenshot(full_page=True, type='png')
+                # store/upload
+                if S3_BUCKET:
+                    key = f"renders/{task_id}.png"
+                    url = upload_to_s3(png_bytes, key, 'image/png')
+                    if url:
+                        r.set(f"task_png_url:{task_id}", url, ex=REDIS_TTL)
+                    else:
+                        r.set(f"task_png:{task_id}", base64.b64encode(png_bytes).decode('ascii'), ex=REDIS_TTL)
+                else:
+                    r.set(f"task_png:{task_id}", base64.b64encode(png_bytes).decode('ascii'), ex=REDIS_TTL)
+                # send to Telegram
+                await notify_user_with_file(task_id, png_bytes, is_pdf=False)
+            else:
+                logger.info('Rendering task %s as PDF', task_id)
+                pdf_bytes = await page.pdf(format='A4', print_background=True)
+                if S3_BUCKET:
+                    key = f"renders/{task_id}.pdf"
+                    url = upload_to_s3(pdf_bytes, key, 'application/pdf')
+                    if url:
+                        r.set(f"task_pdf_url:{task_id}", url, ex=REDIS_TTL)
+                    else:
+                        r.set(f"task_pdf:{task_id}", base64.b64encode(pdf_bytes).decode('ascii'), ex=REDIS_TTL)
+                else:
+                    r.set(f"task_pdf:{task_id}", base64.b64encode(pdf_bytes).decode('ascii'), ex=REDIS_TTL)
+                await notify_user_with_file(task_id, pdf_bytes, is_pdf=True)
+
+        except Exception:
+            logger.exception('Render failed for %s', task_id)
+        finally:
+            try:
+                await page.close()
+            except Exception:
+                pass
+            try:
+                await browser.close()
+            except Exception:
+                pass
+
+async def notify_user_with_file(task_id: str, file_bytes: bytes, is_pdf: bool):
+    # Try to send the generated file to the assignee via Telegram Bot API
+    try:
+        assignee = r.get(f"task_assignee:{task_id}")
+        if assignee:
+            chat_id = assignee.decode('utf-8') if isinstance(assignee, bytes) else str(assignee)
+            if TELEGRAM_TOKEN:
+                url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/"
+                if is_pdf:
+                    api = url + 'sendDocument'
+                    files = {'document': (f'task_{task_id}.pdf', file_bytes, 'application/pdf')}
+                else:
+                    api = url + 'sendPhoto'
+                    files = {'photo': (f'task_{task_id}.png', file_bytes, 'image/png')}
+                data = {'chat_id': chat_id}
+                resp = requests.post(api, data=data, files=files, timeout=30)
+                if resp.status_code // 100 != 2:
+                    logger.warning('Telegram send failed: %s %s', resp.status_code, resp.text)
+                else:
+                    logger.info('Sent rendered file to user %s for task %s', chat_id, task_id)
+            else:
+                logger.info('TELEGRAM_TOKEN not set; skipping send to user %s for task %s', assignee, task_id)
+        else:
+            logger.info('No assignee for task %s; skipping direct send', task_id)
+    except Exception:
+        logger.exception('Failed to notify user for task %s', task_id)
+
+async def worker_loop():
+    logger.info('Render worker started, waiting for tasks...')
+    while True:
+        try:
+            # BRPOP returns tuple (queue, value) or None on timeout
+            item = r.brpop('render_queue', timeout=5)
+            if not item:
+                await asyncio.sleep(0.1)
+                continue
+            _, task_id = item
+            if isinstance(task_id, bytes):
+                task_id = task_id.decode('utf-8')
+            logger.info('Got task %s from queue', task_id)
+            # mark pending -> handled
+            r.set(f"task_pending:{task_id}", '1', ex=REDIS_TTL)
+            await render_task(task_id)
+            # mark ready
+            r.set(f"task_ready:{task_id}", '1', ex=REDIS_TTL)
+            r.delete(f"task_pending:{task_id}")
+        except Exception:
+            logger.exception('Worker loop error')
+            await asyncio.sleep(1)
+
+def main():
+    # Ensure Playwright browsers are installed when running container
+    logger.info('Starting render service')
+    asyncio.run(worker_loop())
+
+if __name__ == '__main__':
+    main()

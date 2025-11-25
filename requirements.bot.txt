@@ -1,0 +1,9 @@
+python-telegram-bot==20.6
+redis==5.3.0
+requests==2.31.0
+python-dotenv==1.0.0
+Flask==3.0.3
+# Jinja2 comes as dependency of Flask but pin explicitly if needed
+Jinja2==3.1.2
+
+# Markdown not required on the bot side by default (rendering happens in render service)

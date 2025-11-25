@@ -44,17 +44,26 @@ INDEX_HTML = """
         <h1>Monitor — Task simulator</h1>
         <p class="small">Click a simulated task to emulate Hugo behaviour: it will create a `task:&lt;id&gt;` in Redis, enqueue a render job, and redirect you to the Telegram bot with <code>?start=&lt;id&gt;</code>.</p>
 
-        {% for tid, text in tasks.items() %}
+        {% for tid, meta in tasks.items() %}
             <div class="task">
                 <strong>Task id: {{ tid }}</strong>
-                <div>{{ text }}</div>
-                <div class="controls">
-                    <a href="#" data-task="{{ tid }}" class="open">Open in bot (simulate)</a>
+                <div>
+                    {% if meta.images and meta.images|length > 0 %}
+                        <img src="{{ meta.images[0] }}" alt="thumb" style="height:90px;float:right;margin-left:12px;border:1px solid #eee;padding:4px;background:#fff;border-radius:4px"/>
+                    {% endif %}
+                    <div>{{ meta.text }}</div>
+                </div>
+                <div style="clear:both" class="controls">
+                    <a href="#" data-task="{{ tid }}" data-text="{{ meta.text|e }}" class="open">Open in bot (simulate)</a>
                 </div>
             </div>
         {% endfor %}
 
         <hr/>
+        <div style="margin:10px 0">
+            <button id="clear-all" style="background:#ef4444;color:#fff;border:none;padding:8px 12px;border-radius:6px;cursor:pointer">Clear Redis (tasks, queue, logs)</button>
+            <button id="clear-logs" style="margin-left:8px;padding:8px 12px;border-radius:6px;cursor:pointer">Clear Bot Logs</button>
+        </div>
         <h3>Custom task</h3>
         <form id="custom">
             <label>Task id (eg. task-60-27-4): <input name="task_id" value="task-60-99-1"/></label>
@@ -90,8 +99,23 @@ INDEX_HTML = """
                 el.addEventListener('click', async (ev)=>{
                     ev.preventDefault();
                     const tid = el.dataset.task;
-                    await simulate(tid, 'Симулированное задание '+tid);
+                    const text = el.dataset.text || ('Симулированное задание '+tid);
+                    await simulate(tid, text);
                 });
+            });
+
+            document.getElementById('clear-logs').addEventListener('click', async ()=>{
+                if(!confirm('Clear bot logs?')) return;
+                const r = await fetch('/clear_logs', {method:'POST'});
+                if(r.ok) alert('Bot logs cleared'); else alert('Failed');
+            });
+
+            document.getElementById('clear-all').addEventListener('click', async ()=>{
+                if(!confirm('This will delete temporary task keys, render queue and bot logs in Redis. Continue?')) return;
+                const r = await fetch('/clear_all', {method:'POST'});
+                if(!r.ok){ alert('Failed to clear: '+r.statusText); return; }
+                const j = await r.json();
+                alert('Cleared '+(j.deleted||0)+' keys');
             });
 
             document.getElementById('custom').addEventListener('submit', async (ev)=>{
@@ -110,11 +134,66 @@ INDEX_HTML = """
 
 @app.route('/')
 def index():
+    # Try to populate monitor with real tasks from index.json (if present)
+    tasks = {}
+    try:
+        here = os.path.dirname(__file__)
+        idx_path = os.path.join(here, 'index.json')
+        if os.path.exists(idx_path):
+            with open(idx_path, 'r', encoding='utf-8') as fh:
+                data = json.load(fh)
+            # collect up to N tasks that have at least one named task or interesting text
+            N = 8
+            added = 0
+            import base64
+
+            def make_svg_data_url(title, page):
+                # simple SVG thumbnail with page and title (kept small)
+                s = f"""<svg xmlns='http://www.w3.org/2000/svg' width='360' height='180'>
+  <rect width='100%' height='100%' fill='#f7f9fc' stroke='#ddd'/> 
+  <text x='12' y='28' font-size='18' fill='#1f2937'>Страница {page}</text>
+  <text x='12' y='56' font-size='14' fill='#374151'>""" + (title.replace('&','&amp;').replace('<','&lt;')[:140]) + """</text>
+</svg>"""
+                b = s.encode('utf-8')
+                return 'data:image/svg+xml;base64,' + base64.b64encode(b).decode('ascii')
+
+            for entry in data:
+                if added >= N:
+                    break
+                page = entry.get('page')
+                tasks_list = entry.get('tasks') or []
+                # if there are explicit tasks, add each as a separate simulated task
+                if tasks_list:
+                    for idx, tlabel in enumerate(tasks_list[:2]):
+                        if added >= N:
+                            break
+                        tid = f"hannova-p{page}-{idx+1}"
+                        text = f"{tlabel} — {entry.get('title','').strip()}"
+                        thumb = make_svg_data_url(entry.get('title',''), page)
+                        tasks[tid] = {'text': text, 'images': [thumb]}
+                        added += 1
+                else:
+                    # if no explicit tasks, still add the page as sample once
+                    if added < N:
+                        tid = f"hannova-p{page}-pg"
+                        text = f"{entry.get('title','Страница')} — {entry.get('workbook','')}"
+                        thumb = make_svg_data_url(entry.get('title',''), page)
+                        tasks[tid] = {'text': text, 'images': [thumb]}
+                        added += 1
+    except Exception:
         tasks = {
-                'task-60-27-4': 'Пример задачи 60.27.4',
-                'task-60-27-5': 'Пример задачи 60.27.5'
+            'task-60-27-4': {'text': 'Пример задачи 60.27.4', 'images': []},
+            'task-60-27-5': {'text': 'Пример задачи 60.27.5', 'images': []}
         }
-        return render_template_string(INDEX_HTML, tasks=tasks)
+
+    # Fallback minimal tasks if index.json missing or empty
+    if not tasks:
+        tasks = {
+            'task-60-27-4': {'text': 'Пример задачи 60.27.4', 'images': []},
+            'task-60-27-5': {'text': 'Пример задачи 60.27.5', 'images': []}
+        }
+
+    return render_template_string(INDEX_HTML, tasks=tasks)
 
 
 # Получить последние 100 логов
@@ -257,6 +336,53 @@ def task_image(task_id, idx):
 def clear_logs():
     r.delete('bot_logs')
     return jsonify({'status': 'ok'})
+
+
+@app.route('/clear_all', methods=['POST'])
+def clear_all():
+    """Delete known temporary keys used by the monitor/bot/render pipeline.
+    This intentionally targets only keys/patterns we use (not arbitrary keys).
+    """
+    patterns = [
+        'task:*',
+        'task_png:*',
+        'task_pdf:*',
+        'task_png_url:*',
+        'task_pdf_url:*',
+        'task_pending:*',
+        'task_ready:*',
+        'task_assignee:*',
+    ]
+    deleted = []
+    # collect keys from patterns
+    try:
+        for p in patterns:
+            try:
+                found = r.keys(p)
+            except Exception:
+                found = []
+            if found:
+                try:
+                    r.delete(*found)
+                except Exception:
+                    for k in found:
+                        try:
+                            r.delete(k)
+                        except Exception:
+                            pass
+                deleted.extend(found)
+        # remove render_queue list and bot_logs
+        for single in ('render_queue', 'bot_logs'):
+            try:
+                if r.exists(single):
+                    r.delete(single)
+                    deleted.append(single)
+            except Exception:
+                pass
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+    return jsonify({'deleted': len(deleted), 'keys': deleted[:200]})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)

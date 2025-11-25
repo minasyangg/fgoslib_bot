@@ -18,7 +18,6 @@ import time
 import requests
 import markdown as md
 from jinja2 import Template
-import pyppeteer
 import urllib.parse
 import tempfile
 import base64
@@ -45,7 +44,7 @@ UPSTASH_REDIS_URL = os.environ["UPSTASH_REDIS_URL"]
 HF_API_URL = "https://hf.space/embed/mingg93/fgoslib-qwen3/api/predict/"
 HF_TOKEN = os.environ["HF_TOKEN"]
 MONITOR_BASE_URL = os.environ.get("MONITOR_BASE_URL", "")
-REDIS_TTL = 900  # 14 минут
+REDIS_TTL = int(os.environ.get("REDIS_TTL", "600"))
 
 # ----------------------------
 # Логи
@@ -113,51 +112,8 @@ def call_hf_api(task_text, images=None, user_prompt="", output_format="md"):
     return resp.json()
 
 
-async def render_html_to_pdf_bytes(html: str, paper_format: str = "A4") -> bytes:
-    """Render HTML to PDF bytes using headless Chromium (pyppeteer).
-    This waits for network activity to finish so MathJax can render.
-    """
-    global BROWSER, BROWSER_LOCK
-    if BROWSER_LOCK is None:
-        # lazy-init lock in running loop
-        BROWSER_LOCK = asyncio.Lock()
-
-    # reuse browser where possible to avoid launch overhead
-    async with BROWSER_LOCK:
-        if BROWSER is None:
-            logger.info("Launching shared Chromium instance for PDF rendering")
-            BROWSER = await pyppeteer.launch(options={"args": ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]})
-
-    browser = BROWSER
-    try:
-        page = await browser.newPage()
-        try:
-            # try setContent with a generous timeout
-            await page.setContent(html, waitUntil="networkidle0", timeout=60000)
-        except Exception as e:
-            logger.warning(f"page.setContent failed: {e}; trying data: URL fallback")
-            try:
-                data_url = "data:text/html;charset=utf-8," + urllib.parse.quote(html)
-                await page.goto(data_url, waitUntil="networkidle0", timeout=60000)
-            except Exception as e2:
-                logger.exception("Both setContent and data-URL goto failed")
-                raise
-
-        # If MathJax is present, request typesetting before printing
-        try:
-            await page.evaluate("() => { if (window.MathJax && MathJax.typesetPromise) { return MathJax.typesetPromise(); } }")
-        except Exception:
-            # ignore: evaluation may fail if MathJax not loaded yet
-            logger.debug("MathJax typeset call failed or not present; continuing to PDF generation")
-
-        pdf_bytes = await page.pdf({"format": paper_format, "printBackground": True})
-        return pdf_bytes
-    finally:
-        try:
-            # close only the page; keep the browser running for reuse
-            await page.close()
-        except Exception:
-            pass
+# Note: PDF/PNG rendering is performed by the external render service.
+# The bot no longer performs headless rendering locally.
 
 # ----------------------------
 # Команды бота
@@ -190,11 +146,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_session(user_id, task_text, images, user_prompt=prompt, output_format=out_format, username=username, task_ids=task_ids)
             # Записываем привязку task -> user
             try:
-                r.set(f"task_assignee:{task_id}", user_id)
-                # также обновим объект задачи, добавив assigned_user_id
+                # назначаем исполнителя с TTL
+                r.set(f"task_assignee:{task_id}", user_id, ex=REDIS_TTL)
+                # также обновим объект задачи, добавив assigned_user_id и обновим TTL
                 try:
                     task_obj['assigned_user_id'] = user_id
-                    r.set(f"task:{task_id}", json.dumps(task_obj))
+                    r.set(f"task:{task_id}", json.dumps(task_obj), ex=REDIS_TTL)
                 except Exception:
                     pass
             except Exception:
@@ -252,44 +209,60 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 </body>
 </html>"""
 
-            # Check Redis cache for pre-generated PDF
-            cache_key = f"task_pdf:{task_id}"
+            # Проверим готовность рендера: сначала URL в S3, затем base64 в Redis
+            response = None
             try:
-                cached = r.get(cache_key)
-            except Exception:
-                cached = None
-
-            try:
-                if cached:
-                    pdf_bytes = base64.b64decode(cached)
-                    await update.message.reply_document(document=InputFile(io.BytesIO(pdf_bytes), filename=f"task_{task_obj.get('real_id') or task_id}.pdf"))
-                    response = f"Задача {task_obj.get('real_id') or task_id} загружена (из кеша) и отправлена вам в виде PDF."
-                else:
-                    pdf_bytes = await render_html_to_pdf_bytes(html_template)
-                    # store in redis base64-encoded to serve next time
+                png_url = r.get(f"task_png_url:{task_id}") or r.get(f"task_pdf_url:{task_id}")
+                if png_url:
+                    if isinstance(png_url, bytes):
+                        png_url = png_url.decode('utf-8')
+                    # скачиваем и отправляем пользователю
                     try:
-                        b64 = base64.b64encode(pdf_bytes).decode('ascii')
-                        r.set(cache_key, b64, ex=REDIS_TTL * 6)
+                        resp = requests.get(png_url, timeout=30)
+                        resp.raise_for_status()
+                        content = resp.content
+                        # decide type by URL
+                        if png_url.lower().endswith('.png'):
+                            await update.message.reply_photo(photo=content)
+                        else:
+                            await update.message.reply_document(document=InputFile(io.BytesIO(content), filename=f"task_{task_obj.get('real_id') or task_id}.pdf"))
+                        response = f"Задача {task_obj.get('real_id') or task_id} готова и отправлена." 
                     except Exception:
-                        logger.exception('Не удалось сохранить PDF в кэш Redis')
-                    await update.message.reply_document(document=InputFile(io.BytesIO(pdf_bytes), filename=f"task_{task_obj.get('real_id') or task_id}.pdf"))
-                    response = f"Задача {task_obj.get('real_id') or task_id} загружена и отправлена вам в виде PDF."
-            except Exception as e:
-                logger.exception('Ошибка отправки PDF файла')
-                # fallback: send .md file if PDF generation fails
+                        logger.exception('Ошибка при скачивании/отправке файла по URL')
+
+                else:
+                    # check base64 blobs
+                    png_b64 = r.get(f"task_png:{task_id}") or r.get(f"task_pdf:{task_id}")
+                    if png_b64:
+                        if isinstance(png_b64, bytes):
+                            png_b64 = png_b64.decode('ascii')
+                        try:
+                            data = base64.b64decode(png_b64)
+                            # we don't know type; try PNG first
+                            try:
+                                await update.message.reply_photo(photo=data)
+                                response = f"Задача {task_obj.get('real_id') or task_id} готова и отправлена." 
+                            except Exception:
+                                await update.message.reply_document(document=InputFile(io.BytesIO(data), filename=f"task_{task_obj.get('real_id') or task_id}.pdf"))
+                                response = f"Задача {task_obj.get('real_id') or task_id} готова и отправлена." 
+                        except Exception:
+                            logger.exception('Ошибка декодирования base64')
+
+            except Exception:
+                logger.exception('Ошибка проверки готовности рендера')
+
+            # Если файл не отправился — поставим задачу в очередь на рендер (если не в процессе)
+            if not response:
                 try:
-                    await update.message.reply_document(document=InputFile(io.BytesIO(md_content.encode('utf-8')), filename=f"task_{task_id}.md"))
-                    response = f"Задача {task_obj.get('real_id') or task_id} загружена, отправлена как .md (PDF failed): {e}"
+                    pending = r.get(f"task_pending:{task_id}")
+                    if not pending:
+                        r.lpush('render_queue', task_id)
+                        r.set(f"task_pending:{task_id}", '1', ex=REDIS_TTL)
+                        response = f"Задача {task_obj.get('real_id') or task_id} принята. Начинаю рендер, файл придёт в Telegram как только будет готов."
+                    else:
+                        response = f"Рендер для задачи {task_obj.get('real_id') or task_id} уже в процессе — файл придёт, как только будет готов."
                 except Exception:
-                    response = f"Задача {task_obj.get('real_id') or task_id} загружена, но не удалось отправить файл: {e}"
-            except Exception as e:
-                logger.exception('Ошибка отправки PDF файла')
-                # fallback: send .md file if PDF generation fails
-                try:
-                    await update.message.reply_document(document=InputFile(io.BytesIO(md_content.encode('utf-8')), filename=f"task_{task_id}.md"))
-                    response = f"Задача {task_obj.get('real_id') or task_id} загружена, отправлена как .md (PDF failed): {e}"
-                except Exception:
-                    response = f"Задача {task_obj.get('real_id') or task_id} загружена, но не удалось отправить файл: {e}"
+                    logger.exception('Не удалось поставить задачу в очередь рендера')
 
             # Кнопки: Решить / Удалить
             try:
@@ -336,7 +309,7 @@ async def handle_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'real_id': ''
     }
     try:
-        r.set(f"task:{local_task_id}", json.dumps(task_obj))
+        r.set(f"task:{local_task_id}", json.dumps(task_obj), ex=REDIS_TTL)
     except Exception:
         logger.exception('Ошибка записи локальной задачи в Redis')
 
@@ -431,7 +404,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 
         # Сохраним результат
         try:
-            r.set(f"task_result:{task_id}", json.dumps(result))
+            r.set(f"task_result:{task_id}", json.dumps(result), ex=REDIS_TTL)
         except Exception:
             pass
 

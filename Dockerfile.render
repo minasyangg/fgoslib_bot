@@ -1,0 +1,18 @@
+FROM mcr.microsoft.com/playwright/python:1.40.0-focal
+
+# Create app dir
+WORKDIR /usr/src/app
+
+# Copy requirements and install
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Playwright browsers are preinstalled in the base image, but ensure drivers are ready
+RUN playwright install --with-deps || true
+
+# Copy app
+COPY render_service.py ./
+
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python", "render_service.py"]

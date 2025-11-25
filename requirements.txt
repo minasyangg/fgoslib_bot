@@ -1,12 +1,8 @@
-python-telegram-bot==20.6
-redis==5.3.0
-requests==2.31.0
-python-dotenv==1.0.0
-Flask==3.0.3
+--requirement requirements.bot.txt
+--requirement requirements.render.txt
 
-# For HTML -> PDF rendering with headless Chromium
-pyppeteer==1.0.2
-# For markdown -> html conversion
-Markdown==3.5.2
-# Simple HTML templating
-Jinja2==3.1.2
+# Note: dependencies are split into two files for clarity:
+# - requirements.bot.txt  : dependencies needed to run the Telegram bot + monitor
+# - requirements.render.txt : dependencies for the render service (Playwright, S3, etc.)
+
+# You can still install everything via this file which includes both sets.
