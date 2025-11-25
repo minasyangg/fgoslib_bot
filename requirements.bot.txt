@@ -6,4 +6,6 @@ Flask==3.0.3
 # Jinja2 comes as dependency of Flask but pin explicitly if needed
 Jinja2==3.1.2
 
-# Markdown not required on the bot side by default (rendering happens in render service)
+Markdown==3.5.2
+
+# Markdown is used by `my_bot.py` during deployment; keep it here so bot deploys succeed.

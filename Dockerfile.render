@@ -1,14 +1,35 @@
-FROM mcr.microsoft.com/playwright/python:1.40.0-focal
+FROM python:3.12-slim
 
 # Create app dir
 WORKDIR /usr/src/app
 
-# Copy requirements and install
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# Install system deps needed for Playwright
+RUN apt-get update && apt-get install -y --no-install-recommends \
+	ca-certificates \
+	wget \
+	gnupg \
+	curl \
+	libnss3 \
+	libatk1.0-0 \
+	libatk-bridge2.0-0 \
+	libcups2 \
+	libxss1 \
+	libasound2 \
+	libgbm1 \
+	libpangocairo-1.0-0 \
+	libx11-6 \
+	libxcomposite1 \
+	libxrandr2 \
+	libfontconfig1 \
+	fonts-liberation \
+	&& rm -rf /var/lib/apt/lists/*
 
-# Playwright browsers are preinstalled in the base image, but ensure drivers are ready
-RUN playwright install --with-deps || true
+# Copy requirements and install
+COPY requirements.render.txt ./
+RUN pip install --no-cache-dir -r requirements.render.txt
+
+# Install playwright browsers and deps
+RUN playwright install --with-deps || playwright install chromium || true
 
 # Copy app
 COPY render_service.py ./
