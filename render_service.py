@@ -155,39 +155,38 @@ async def render_task(task_id: str):
             except Exception:
                 pass
 
-            # measure page height to decide PNG vs PDF
-            scroll_height = await page.evaluate('() => document.body.scrollHeight')
-            logger.info('Task %s scrollHeight=%s', task_id, scroll_height)
+            # Previously we used page height to decide PNG vs PDF. Switch to PDF-only
+            # by default because PDF generation is faster and matches requirements.
+            # Keep PNG generation code below for future use (left as reference).
 
-            # heuristic: if content fits in one viewport (~1200px) → PNG, else PDF
-            if scroll_height <= 1400:
-                logger.info('Rendering task %s as PNG', task_id)
-                png_bytes = await page.screenshot(full_page=True, type='png')
-                # store/upload
-                if S3_BUCKET:
-                    key = f"renders/{task_id}.png"
-                    url = upload_to_s3(png_bytes, key, 'image/png')
-                    if url:
-                        r.set(f"task_png_url:{task_id}", url, ex=REDIS_TTL)
-                    else:
-                        r.set(f"task_png:{task_id}", base64.b64encode(png_bytes).decode('ascii'), ex=REDIS_TTL)
-                else:
-                    r.set(f"task_png:{task_id}", base64.b64encode(png_bytes).decode('ascii'), ex=REDIS_TTL)
-                # send to Telegram
-                await notify_user_with_file(task_id, png_bytes, is_pdf=False)
-            else:
-                logger.info('Rendering task %s as PDF', task_id)
-                pdf_bytes = await page.pdf(format='A4', print_background=True)
-                if S3_BUCKET:
-                    key = f"renders/{task_id}.pdf"
-                    url = upload_to_s3(pdf_bytes, key, 'application/pdf')
-                    if url:
-                        r.set(f"task_pdf_url:{task_id}", url, ex=REDIS_TTL)
-                    else:
-                        r.set(f"task_pdf:{task_id}", base64.b64encode(pdf_bytes).decode('ascii'), ex=REDIS_TTL)
+            logger.info('Rendering task %s as PDF (forced)', task_id)
+            pdf_bytes = await page.pdf(format='A4', print_background=True)
+            if S3_BUCKET:
+                key = f"renders/{task_id}.pdf"
+                url = upload_to_s3(pdf_bytes, key, 'application/pdf')
+                if url:
+                    r.set(f"task_pdf_url:{task_id}", url, ex=REDIS_TTL)
                 else:
                     r.set(f"task_pdf:{task_id}", base64.b64encode(pdf_bytes).decode('ascii'), ex=REDIS_TTL)
-                await notify_user_with_file(task_id, pdf_bytes, is_pdf=True)
+            else:
+                r.set(f"task_pdf:{task_id}", base64.b64encode(pdf_bytes).decode('ascii'), ex=REDIS_TTL)
+            await notify_user_with_file(task_id, pdf_bytes, is_pdf=True)
+
+            # --- PNG generation code (kept for future use) ---
+            # scroll_height = await page.evaluate('() => document.body.scrollHeight')
+            # logger.info('Task %s scrollHeight=%s', task_id, scroll_height)
+            # if scroll_height <= 1400:
+            #     png_bytes = await page.screenshot(full_page=True, type='png')
+            #     if S3_BUCKET:
+            #         key = f"renders/{task_id}.png"
+            #         url = upload_to_s3(png_bytes, key, 'image/png')
+            #         if url:
+            #             r.set(f"task_png_url:{task_id}", url, ex=REDIS_TTL)
+            #         else:
+            #             r.set(f"task_png:{task_id}", base64.b64encode(png_bytes).decode('ascii'), ex=REDIS_TTL)
+            #     else:
+            #         r.set(f"task_png:{task_id}", base64.b64encode(png_bytes).decode('ascii'), ex=REDIS_TTL)
+            #     await notify_user_with_file(task_id, png_bytes, is_pdf=False)
 
         except Exception:
             logger.exception('Render failed for %s', task_id)
