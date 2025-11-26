@@ -38,6 +38,13 @@ RUN playwright install --with-deps || playwright install chromium || true
 # Copy app
 COPY render_service.py ./
 
+# Download KaTeX assets during build so container can serve them locally
+RUN mkdir -p ./static/katex && \
+	curl -L https://registry.npmjs.org/katex/-/katex-0.16.8.tgz -o katex.tgz && \
+	tar -xzf katex.tgz package/dist && \
+	mv package/dist/* ./static/katex/ || true && \
+	rm -rf katex.tgz package || true
+
 ENV PYTHONUNBUFFERED=1
 
 # Render.com expects web services to bind to a port. Default to 8080.
