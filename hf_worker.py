@@ -119,17 +119,46 @@ def send_telegram_document(chat_id: int, file_bytes: bytes, filename: str = 'sol
 def call_hf_api(payload: dict) -> dict:
     """POST payload to HF API URL and return response JSON."""
     headers = {'Authorization': f'Bearer {HF_API_TOKEN}'} if HF_API_TOKEN else {}
+    urls_to_try = []
+    if HF_API_URL:
+        urls_to_try.append(HF_API_URL)
+    # try embed-style API path
     try:
-        resp = requests.post(HF_API_URL, headers=headers, json=payload, timeout=HF_TIMEOUT)
-        resp.raise_for_status()
+        owner, repo = HF_SPACE.split('/')
+        embed_url = f"https://hf.space/embed/{owner}/{repo}/api/predict{HF_API_NAME}"
+        urls_to_try.append(embed_url)
+        direct_url = f"https://{owner}-{repo}.hf.space/api/predict{HF_API_NAME}"
+        urls_to_try.append(direct_url)
+    except Exception:
+        # malformed HF_SPACE; skip
+        pass
+
+    last_exc = None
+    for url in urls_to_try:
         try:
-            return resp.json()
-        except Exception:
-            logger.exception('HF response not JSON')
-            return {'error': 'invalid_response', 'text': resp.text}
-    except Exception as e:
-        logger.exception('HF API call failed')
-        raise
+            logger.info('Calling HF HTTP API at %s', url)
+            resp = requests.post(url, headers=headers, json=payload, timeout=HF_TIMEOUT)
+            resp.raise_for_status()
+            try:
+                return resp.json()
+            except Exception:
+                logger.exception('HF response not JSON from %s', url)
+                return {'error': 'invalid_response', 'text': resp.text}
+        except requests.exceptions.HTTPError as he:
+            # If 405, try next candidate URL; otherwise record and continue
+            logger.warning('HF HTTP error from %s: %s', url, he)
+            last_exc = he
+            continue
+        except Exception as e:
+            logger.exception('HF API call failed to %s', url)
+            last_exc = e
+            continue
+
+    # all attempts failed
+    logger.error('All HF HTTP API attempts failed')
+    if last_exc:
+        raise last_exc
+    raise RuntimeError('HF API call failed (no endpoint configured)')
 
 
 def download_url(url: str) -> bytes:
