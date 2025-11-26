@@ -29,6 +29,7 @@ import logging
 import base64
 import requests
 import threading
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
 import redis
@@ -246,23 +247,31 @@ def main():
         if web is None:
             logger.warning('aiohttp not available; health endpoint disabled')
             return
-        port = int(os.environ.get('PORT', os.environ.get('PORT', '8080')))
-        app = web.Application()
+        port = int(os.environ.get('PORT', '8080'))
 
         async def health(request):
+            # optionally include queue length or other quick checks later
             return web.json_response({'status': 'ok'})
 
-        app.add_routes([web.get('/', health), web.get('/health', health)])
-
+        # create a new event loop and run aiohttp AppRunner there to avoid
+        # setting signal handlers from a non-main thread
         def runner():
             try:
-                web.run_app(app, host='0.0.0.0', port=port)
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                app = web.Application()
+                app.add_routes([web.get('/', health), web.get('/health', health)])
+                runner_obj = web.AppRunner(app)
+                loop.run_until_complete(runner_obj.setup())
+                site = web.TCPSite(runner_obj, '0.0.0.0', port)
+                loop.run_until_complete(site.start())
+                logger.info('Health server started on port %s (background loop)', port)
+                loop.run_forever()
             except Exception:
                 logger.exception('Health server stopped')
 
         t = threading.Thread(target=runner, daemon=True)
         t.start()
-        logger.info('Health server started on port %s', port)
 
     start_health()
 
