@@ -404,7 +404,26 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
             await query.edit_message_text('Неверные данные задачи.')
             return
 
-        await query.edit_message_text('Задача поставлена в очередь на обработку (HF). Как только решение будет готово, я отправлю его в этот чат.')
+        # Попытка обновить текст сообщения: если это был текстовый message — редактируем текст,
+        # если это был документ/фото без текста — попробуем отредактировать caption,
+        # в противном случае отправим новое сообщение в чат как fallback.
+        msg_text = 'Задача поставлена в очередь на обработку (HF). Как только решение будет готово, я отправлю его в этот чат.'
+        try:
+            if query.message and getattr(query.message, 'text', None):
+                await query.edit_message_text(msg_text)
+            else:
+                # try editing caption (works for media messages)
+                try:
+                    await query.edit_message_caption(msg_text)
+                except Exception:
+                    # fallback: send a separate message to the chat
+                    await context.bot.send_message(chat_id=query.message.chat_id, text=msg_text)
+        except Exception:
+            logger.exception('Failed to edit/notify message after solve click')
+            try:
+                await context.bot.send_message(chat_id=query.message.chat_id, text=msg_text)
+            except Exception:
+                logger.exception('Failed to send fallback notification to user')
         # Собираем полезную нагрузку для HF воркера
         payload = {
             'task_id': task_id,
