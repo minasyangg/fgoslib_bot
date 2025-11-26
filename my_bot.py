@@ -392,38 +392,31 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
             await query.edit_message_text('Неверные данные задачи.')
             return
 
-        await query.edit_message_text('Запускаю генерацию (HF)...')
-        # Вызов HF в отдельном потоке
+        await query.edit_message_text('Задача поставлена в очередь на обработку (HF). Как только решение будет готово, я отправлю его в этот чат.')
+        # Собираем полезную нагрузку для HF воркера
+        payload = {
+            'task_id': task_id,
+            'chat_id': query.message.chat_id,
+            'task_text': task_obj.get('task_text',''),
+            'images': task_obj.get('images', []),
+            'user_prompt': task_obj.get('prompt','') or ''
+        }
         try:
-            result = await asyncio.to_thread(call_hf_api, task_obj.get('task_text',''), task_obj.get('images',[]), task_obj.get('prompt',''), task_obj.get('format','md'))
+            # Пометим задачу как ожидающую HF, чтобы избежать дублей
+            pending_key = f"task_pending_hf:{task_id}"
+            pending = r.get(pending_key)
+            if not pending:
+                # push to hf_queue (worker uses BRPOP)
+                r.lpush('hf_queue', json.dumps(payload))
+                r.set(pending_key, '1', ex=REDIS_TTL)
+                log_event(username, f"enqueue_hf {task_id}", 'enqueued')
+            else:
+                log_event(username, f"enqueue_hf {task_id}", 'already_pending')
         except Exception as e:
-            logger.exception('Ошибка при обращении к HF API')
-            await context.bot.send_message(chat_id=query.message.chat_id, text=f'Ошибка при генерации: {e}')
+            logger.exception('Не удалось поставить задачу в hf_queue')
+            await context.bot.send_message(chat_id=query.message.chat_id, text=f'Ошибка при постановке в очередь: {e}')
             log_event(username, f"solve {task_id}", f"error: {e}")
             return
-
-        # Сохраним результат
-        try:
-            r.set(f"task_result:{task_id}", json.dumps(result), ex=REDIS_TTL)
-        except Exception:
-            pass
-
-        # Отправляем результат пользователю
-        try:
-            if isinstance(result, dict) and 'text' in result:
-                await context.bot.send_message(chat_id=query.message.chat_id, text=result['text'])
-                log_event(username, f"solve {task_id}", result['text'])
-            elif isinstance(result, dict) and 'pdf' in result:
-                pdf_url = result['pdf']
-                pdf_bytes = requests.get(pdf_url).content
-                await context.bot.send_document(chat_id=query.message.chat_id, document=InputFile(io.BytesIO(pdf_bytes), filename='solution.pdf'))
-                log_event(username, f"solve {task_id}", '[PDF sent]')
-            else:
-                await context.bot.send_message(chat_id=query.message.chat_id, text=str(result))
-                log_event(username, f"solve {task_id}", str(result))
-        except Exception as e:
-            logger.exception('Ошибка отправки результата')
-            await context.bot.send_message(chat_id=query.message.chat_id, text=f'Ошибка отправки результата: {e}')
 
     elif data.startswith('del:'):
         task_id = data.split(':',1)[1]
