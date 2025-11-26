@@ -15,5 +15,7 @@ RUN pip install --no-cache-dir -r /app/requirements.hf.txt
 COPY . /app
 
 ENV PYTHONUNBUFFERED=1
+ENV PORT=8080
+EXPOSE 8080
 
 CMD ["python", "hf_worker.py"]
