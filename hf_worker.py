@@ -193,7 +193,7 @@ def call_hf_via_gradio_client(task_text: str, images: list, user_prompt: str):
             elif img.startswith('data:'):
                 # save data url to temp file
                 try:
-                    import base64, tempfile, re
+                    import base64, tempfile, os, re
                     header, b64 = img.split(',', 1)
                     ext = '.png'
                     m = re.search(r'data:image/([a-zA-Z0-9]+);', header)
@@ -265,39 +265,36 @@ def process_task(item: dict):
 
     logger.info('Processing task %s for chat %s', task_id, chat_id)
 
+    # Validate
+    if len(images) > MAX_IMAGES:
+        images = images[:MAX_IMAGES]
+    if len(user_prompt) > MAX_PROMPT_LEN:
+        user_prompt = user_prompt[:MAX_PROMPT_LEN]
+
+    allowed = moderate_prompt(user_prompt)
+    if not allowed:
+        # notify user and drop prompt
         try:
-            markdown = None
-            file_bytes = None
-            gen_time = None
-            try:
-                markdown = res[0]
-                file_part = res[1]
-                gen_time = res[2] if len(res) > 2 else None
-                # file_part can be a dict with 'url' or a local path
-                if isinstance(file_part, dict):
-                    url = file_part.get('url') or file_part.get('path')
-                    if url and isinstance(url, str) and url.startswith('http'):
-                        file_bytes = download_url(url)
-                    elif url and isinstance(url, str) and os.path.exists(url):
-                        with open(url, 'rb') as f:
-                            file_bytes = f.read()
-                        try:
-                            os.remove(url)
-                        except Exception:
-                            pass
-                elif isinstance(file_part, str):
-                    if file_part.startswith('http'):
-                        file_bytes = download_url(file_part)
-                    elif os.path.exists(file_part):
-                        with open(file_part, 'rb') as f:
-                            file_bytes = f.read()
-                        try:
-                            os.remove(file_part)
-                        except Exception:
-                            pass
-            except Exception:
-                logger.exception('Failed to parse gradio client result')
-            return {'markdown': markdown, 'file_bytes': file_bytes, 'time': gen_time}
+            if TG_API_BASE and chat_id:
+                msg = {'chat_id': str(chat_id), 'text': 'Дополнительный промпт отклонён политикой; задача отправлена без него.'}
+                requests.post(TG_API_BASE + 'sendMessage', data=msg, timeout=10)
+        except Exception:
+            logger.exception('Failed to send moderation notice')
+        user_prompt = ''
+
+    payload = {
+        'task_id': task_id,
+        'task_text': task_text,
+        'images': images,
+        'user_prompt': user_prompt
+    }
+
+    # call HF with retries
+    attempt = 0
+    last_err = None
+    while attempt <= RETRIES:
+        try:
+            # prefer gradio_client when configured
             resp = None
             if USE_GRADIO_CLIENT:
                 try:

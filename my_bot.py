@@ -211,8 +211,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # Проверим готовность рендера: сначала URL в S3, затем base64 в Redis
             response = None
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Решить", callback_data=f"solve:{task_id}"), InlineKeyboardButton("Удалить", callback_data=f"del:{task_id}")]])
             try:
                 png_url = r.get(f"task_png_url:{task_id}") or r.get(f"task_pdf_url:{task_id}")
+                png_b64 = None
                 if png_url:
                     if isinstance(png_url, bytes):
                         png_url = png_url.decode('utf-8')
@@ -223,16 +225,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         content = resp.content
                         # decide type by URL
                         if png_url.lower().endswith('.png'):
-                            await update.message.reply_photo(photo=content)
+                            await update.message.reply_photo(photo=content, reply_markup=kb)
                         else:
-                            await update.message.reply_document(document=InputFile(io.BytesIO(content), filename=f"task_{task_obj.get('real_id') or task_id}.pdf"))
+                            await update.message.reply_document(document=InputFile(io.BytesIO(content), filename=f"task_{task_obj.get('real_id') or task_id}.pdf"), reply_markup=kb)
                         response = f"Задача {task_obj.get('real_id') or task_id} готова и отправлена." 
                     except Exception:
                         logger.exception('Ошибка при скачивании/отправке файла по URL')
 
                 else:
-                    # check base64 blobs
-                    png_b64 = r.get(f"task_png:{task_id}") or r.get(f"task_pdf:{task_id}")
+                    # check render-worker result keys (they may store a URL or base64 under task_pdf_result or task_result)
+                    alt = r.get(f"task_pdf_result:{task_id}") or r.get(f"task_result:{task_id}")
+                    if alt:
+                        if isinstance(alt, bytes):
+                            alt = alt.decode('utf-8')
+                        # If alt looks like a URL, treat as such, otherwise treat as base64 blob
+                        if isinstance(alt, str) and alt.startswith('http'):
+                            png_url = alt
+                        else:
+                            png_b64 = alt
+                    else:
+                        # check base64 blobs
+                        png_b64 = r.get(f"task_png:{task_id}") or r.get(f"task_pdf:{task_id}")
                     if png_b64:
                         if isinstance(png_b64, bytes):
                             png_b64 = png_b64.decode('ascii')
@@ -240,10 +253,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             data = base64.b64decode(png_b64)
                             # we don't know type; try PNG first
                             try:
-                                await update.message.reply_photo(photo=data)
+                                await update.message.reply_photo(photo=data, reply_markup=kb)
                                 response = f"Задача {task_obj.get('real_id') or task_id} готова и отправлена." 
                             except Exception:
-                                await update.message.reply_document(document=InputFile(io.BytesIO(data), filename=f"task_{task_obj.get('real_id') or task_id}.pdf"))
+                                await update.message.reply_document(document=InputFile(io.BytesIO(data), filename=f"task_{task_obj.get('real_id') or task_id}.pdf"), reply_markup=kb)
                                 response = f"Задача {task_obj.get('real_id') or task_id} готова и отправлена." 
                         except Exception:
                             logger.exception('Ошибка декодирования base64')
@@ -264,12 +277,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     logger.exception('Не удалось поставить задачу в очередь рендера')
 
-            # Кнопки: Решить / Удалить
+            # Если файл НЕ был отправлен (response описывает постановку в очередь) — отправляем только текст без кнопок
             try:
-                kb = InlineKeyboardMarkup([[InlineKeyboardButton("Решить", callback_data=f"solve:{task_id}"), InlineKeyboardButton("Удалить", callback_data=f"del:{task_id}")]])
-                await update.message.reply_text(response, reply_markup=kb)
-            except Exception:
                 await update.message.reply_text(response)
+            except Exception:
+                logger.exception('Ошибка отправки response пользователю')
 
             log_event(username, f"/start {task_id}", response)
             return

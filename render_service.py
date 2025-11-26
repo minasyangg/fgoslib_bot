@@ -219,6 +219,18 @@ async def notify_user_with_file(task_id: str, file_bytes: bytes, is_pdf: bool):
                     api = url + 'sendPhoto'
                     files = {'photo': (f'task_{task_id}.png', file_bytes, 'image/png')}
                 data = {'chat_id': chat_id}
+                # attach inline keyboard so user immediately sees actions when file arrives
+                try:
+                    import json as _json
+                    reply_markup = {
+                        'inline_keyboard': [[
+                            {'text': 'Решить', 'callback_data': f'solve:{task_id}'},
+                            {'text': 'Удалить', 'callback_data': f'del:{task_id}'}
+                        ]]
+                    }
+                    data['reply_markup'] = _json.dumps(reply_markup, ensure_ascii=False)
+                except Exception:
+                    logger.exception('Failed to build reply_markup')
                 resp = requests.post(api, data=data, files=files, timeout=30)
                 if resp.status_code // 100 != 2:
                     logger.warning('Telegram send failed: %s %s', resp.status_code, resp.text)
