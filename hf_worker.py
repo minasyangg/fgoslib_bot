@@ -42,6 +42,9 @@ except Exception:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('hf_worker')
 
+# worker start time for uptime metric
+START_TIME = time.time()
+
 UPSTASH_REDIS_URL = os.environ.get('UPSTASH_REDIS_URL')
 if not UPSTASH_REDIS_URL:
     raise RuntimeError('UPSTASH_REDIS_URL is required')
@@ -250,8 +253,17 @@ def main():
         port = int(os.environ.get('PORT', '8080'))
 
         async def health(request):
-            # optionally include queue length or other quick checks later
-            return web.json_response({'status': 'ok'})
+            # include quick metrics: hf_queue length and uptime
+            try:
+                qlen = 0
+                try:
+                    qlen = r.llen('hf_queue')
+                except Exception:
+                    logger.exception('Failed to read hf_queue length')
+                uptime = int(time.time() - START_TIME)
+                return web.json_response({'status': 'ok', 'queue_length': qlen, 'uptime_seconds': uptime})
+            except Exception:
+                return web.json_response({'status': 'ok'})
 
         # create a new event loop and run aiohttp AppRunner there to avoid
         # setting signal handlers from a non-main thread
