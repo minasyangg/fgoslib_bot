@@ -268,7 +268,18 @@ async def start_services():
 
     app = web.Application()
     # serve local static files (e.g. KaTeX resources) from ./static
-    app.router.add_static('/static/', path='./static', show_index=False)
+    static_path = os.path.abspath('./static')
+    try:
+        if not os.path.exists(static_path):
+            os.makedirs(static_path, exist_ok=True)
+            logger.info('Created missing static directory at %s', static_path)
+    except Exception:
+        logger.exception('Failed to ensure static directory exists: %s', static_path)
+
+    if not os.path.isdir(static_path):
+        logger.warning('Static path is not a directory, skipping static route: %s', static_path)
+    else:
+        app.router.add_static('/static/', path=static_path, show_index=False)
     app.add_routes([web.get('/', health), web.get('/health', health)])
 
     runner = web.AppRunner(app)
