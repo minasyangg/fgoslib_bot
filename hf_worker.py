@@ -264,6 +264,7 @@ def call_hf_via_gradio_client(task_text: str, images: list, user_prompt: str):
         markdown = None
         file_bytes = None
         gen_time = None
+        file_name = None
         try:
             markdown = res[0]
             file_part = res[1]
@@ -273,18 +274,37 @@ def call_hf_via_gradio_client(task_text: str, images: list, user_prompt: str):
                 url = file_part.get('url') or file_part.get('path')
                 if url and isinstance(url, str) and url.startswith('http'):
                     file_bytes = download_url(url)
+                    try:
+                        file_name = os.path.basename(url)
+                    except Exception:
+                        file_name = None
                 elif url and isinstance(url, str) and os.path.exists(url):
                     with open(url, 'rb') as f:
                         file_bytes = f.read()
+                    try:
+                        file_name = os.path.basename(url)
+                    except Exception:
+                        file_name = None
             elif isinstance(file_part, str):
                 if file_part.startswith('http'):
                     file_bytes = download_url(file_part)
+                    try:
+                        file_name = os.path.basename(file_part)
+                    except Exception:
+                        file_name = None
                 elif os.path.exists(file_part):
                     with open(file_part, 'rb') as f:
                         file_bytes = f.read()
+                    try:
+                        file_name = os.path.basename(file_part)
+                    except Exception:
+                        file_name = None
+                else:
+                    # maybe base64 or inline content; no filename
+                    file_name = None
         except Exception:
             logger.exception('Failed to parse gradio client result')
-        return {'markdown': markdown, 'file_bytes': file_bytes, 'time': gen_time}
+        return {'markdown': markdown, 'file_bytes': file_bytes, 'time': gen_time, 'file_name': file_name}
     except Exception as e:
         # If this is a Gradio AppError we may be able to detect quota issues
         try:
@@ -387,8 +407,10 @@ def process_task(item: dict):
 
             # If gradio_client was used it returns dict with 'file_bytes' possibly
             pdf_bytes = None
+            file_name = None
             if isinstance(resp, dict) and 'file_bytes' in resp and resp.get('file_bytes'):
                 pdf_bytes = resp.get('file_bytes')
+                file_name = resp.get('file_name')
             # existing HTTP-style responses
             if not pdf_bytes:
                 pdf_url = None
@@ -425,6 +447,35 @@ def process_task(item: dict):
                         return
 
             # send PDF to Telegram if we have bytes
+            # If HF returned a file which is a markdown file -> route to render_service for PDF conversion
+            if file_name and file_name.lower().endswith('.md') and pdf_bytes:
+                try:
+                    # create temporary render task id
+                    render_task_id = f"hf_render:{task_id}"
+                    # create task object where task_text is the markdown content
+                    md_text = pdf_bytes.decode('utf-8', errors='replace')
+                    task_obj = {
+                        'task_text': md_text,
+                        'images': [],
+                        'prompt': '',
+                        'format': 'md',
+                        'real_id': task_id
+                    }
+                    r.set(f"task:{render_task_id}", json.dumps(task_obj), ex=REDIS_TTL)
+                    # assign assignee so render_service will notify correct chat
+                    r.set(f"task_assignee:{render_task_id}", str(chat_id), ex=REDIS_TTL)
+                    # enqueue render
+                    r.lpush('render_queue', render_task_id)
+                    save_result_to_redis(task_id, {'status': 'render_queued', 'message': 'Markdown received; render queued', 'render_task_id': render_task_id})
+                    if TG_API_BASE and chat_id:
+                        try:
+                            requests.post(TG_API_BASE + 'sendMessage', data={'chat_id': str(chat_id), 'text': 'Решение в MD формате получено — ставлю в очередь на рендер в PDF.'}, timeout=10)
+                        except Exception:
+                            logger.exception('Failed to notify user about queued render')
+                    return
+                except Exception:
+                    logger.exception('Failed to queue render for markdown result')
+
             if pdf_bytes:
                 ok = False
                 if TG_API_BASE and chat_id:
