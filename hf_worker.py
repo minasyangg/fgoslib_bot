@@ -43,6 +43,19 @@ try:
 except Exception:
     Client = None
 
+try:
+    # AppError class exists in gradio_client package
+    from gradio_client.client import AppError as GradioAppError
+except Exception:
+    GradioAppError = None
+
+
+class HFQuotaError(Exception):
+    """Raised when the HF Space reports a quota / resource limit error."""
+    def __init__(self, msg: str, retry_after_seconds: int | None = None):
+        super().__init__(msg)
+        self.retry_after_seconds = retry_after_seconds
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('hf_worker')
 
@@ -272,7 +285,28 @@ def call_hf_via_gradio_client(task_text: str, images: list, user_prompt: str):
         except Exception:
             logger.exception('Failed to parse gradio client result')
         return {'markdown': markdown, 'file_bytes': file_bytes, 'time': gen_time}
-    except Exception:
+    except Exception as e:
+        # If this is a Gradio AppError we may be able to detect quota issues
+        try:
+            if GradioAppError is not None and isinstance(e, GradioAppError):
+                msg = str(e)
+                logger.warning('Gradio AppError: %s', msg)
+                low = msg.lower()
+                if 'quota' in low or 'exceeded your gpu quota' in low or 'gpu quota' in low:
+                    # try to parse retry time like 'Try again in HH:MM:SS'
+                    import re
+                    retry = None
+                    m = re.search(r'Try again in (\d{1,2}:\d{2}:\d{2})', msg)
+                    if m:
+                        h, mi, s = m.group(1).split(':')
+                        retry = int(h)*3600 + int(mi)*60 + int(s)
+                    raise HFQuotaError(msg, retry_after_seconds=retry)
+        except HFQuotaError:
+            # bubble up quota error
+            raise
+        except Exception:
+            # not a quota AppError; fall through to generic handler
+            pass
         logger.exception('Gradio client call failed')
         raise
 
@@ -328,6 +362,19 @@ def process_task(item: dict):
             if USE_GRADIO_CLIENT:
                 try:
                     resp = call_hf_via_gradio_client(payload['task_text'], payload.get('images', []), payload.get('user_prompt', ''))
+                except HFQuotaError as qe:
+                    # Service quota exhausted — record and notify user, do not fallback to HTTP
+                    logger.warning('HF quota error for task %s: %s', task_id, qe)
+                    save_result_to_redis(task_id, {'status': 'quota', 'error': str(qe), 'retry_after': qe.retry_after_seconds})
+                    if TG_API_BASE and chat_id:
+                        try:
+                            text = 'Сервис генерации временно недоступен (превышена квота). Попробуйте позже.'
+                            if qe.retry_after_seconds:
+                                text += f' Примерно через {qe.retry_after_seconds//3600} ч.'
+                            requests.post(TG_API_BASE + 'sendMessage', data={'chat_id': str(chat_id), 'text': text}, timeout=10)
+                        except Exception:
+                            logger.exception('Failed to notify user about quota')
+                    return
                 except Exception:
                     logger.exception('gradio_client call failed, falling back to HTTP')
                     resp = None
