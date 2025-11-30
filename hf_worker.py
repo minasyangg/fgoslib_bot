@@ -303,6 +303,26 @@ def call_hf_via_gradio_client(task_text: str, images: list, user_prompt: str):
             logger.info('HF_API_TOKEN set in env for gradio_client: %s', token_preview)
         client = Client(HF_SPACE)
         logger.info('Gradio Client created successfully for space=%s', HF_SPACE)
+        # Diagnostic: check whoami with the token and log a short client repr
+        try:
+            try:
+                who = requests.get('https://huggingface.co/api/whoami-v2',
+                                   headers={'Authorization': f'Bearer {HF_API_TOKEN}'},
+                                   timeout=8)
+                try:
+                    j = who.json()
+                    logger.info('HF whoami: id=%s isPro=%s', j.get('id'), j.get('isPro'))
+                except Exception:
+                    logger.info('HF whoami raw: %s', who.text[:400])
+            except Exception:
+                logger.exception('HF whoami check failed')
+        except Exception:
+            # swallow diagnostics errors
+            pass
+        try:
+            logger.info('gradio client repr: %s', repr(client)[:300])
+        except Exception:
+            pass
     except Exception:
         logger.exception('Failed to create gradio Client')
         raise
