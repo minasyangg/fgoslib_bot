@@ -176,7 +176,11 @@ def call_hf_api(payload: dict) -> dict:
     headers = {'Authorization': f'Bearer {HF_API_TOKEN}'} if HF_API_TOKEN else {}
     urls_to_try = []
     if HF_API_URL:
-        urls_to_try.append(HF_API_URL)
+        # only try HF_API_URL directly if it looks like an API endpoint
+        if '/api/' in HF_API_URL:
+            urls_to_try.append(HF_API_URL)
+        else:
+            logger.warning('Configured HF_API_URL does not look like an API endpoint; skipping direct POST to avoid 405: %s', HF_API_URL)
     # try embed-style API path
     try:
         owner, repo = HF_SPACE.split('/')
