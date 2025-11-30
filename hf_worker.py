@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """HF worker: consumes `hf_queue` and forwards tasks to a HuggingFace Space (Gradio API).
-
 Behavior:
  - BRPOP from Redis `hf_queue` for JSON tasks
  - validate images (<= MAX_IMAGES) and user_prompt length
  - basic moderation of user_prompt using a small blacklist
- - POST payload to `HF_API_URL` with Bearer `HF_API_TOKEN`
+ - POST payload to `HF_API_URL` with Bearer `HF_TOKEN`
  - handle response containing `pdf_url` or `pdf_base64` (or download & forward)
  - store result in Redis under `task_pdf_result:<task_id>` with TTL
  - send PDF to Telegram chat via Bot API when ready
 
 Configuration via environment variables:
  - UPSTASH_REDIS_URL (required)
- - HF_API_TOKEN (required)
+ - HF_TOKEN (required)
  - HF_API_URL (required)  e.g. https://hf.space/embed/<owner>/<repo>/api/predict or other endpoint
  - TELEGRAM_TOKEN (required for sending file)
  - MAX_IMAGES (default 5)
@@ -68,16 +67,16 @@ UPSTASH_REDIS_URL = os.environ.get('UPSTASH_REDIS_URL')
 if not UPSTASH_REDIS_URL:
     raise RuntimeError('UPSTASH_REDIS_URL is required')
 
-HF_API_TOKEN = os.environ.get('HF_API_TOKEN')
+HF_TOKEN = os.environ.get('HF_TOKEN')
 HF_API_URL = os.environ.get('HF_API_URL')
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 
-if not HF_API_TOKEN:
-    logger.warning('HF_API_TOKEN not set; gradio_client calls will fail')
+if not HF_TOKEN:
+    logger.warning('HF_TOKEN not set; gradio_client calls will fail')
 else:
     # Log masked token prefix to verify it's loaded correctly
-    token_preview = HF_API_TOKEN[:8] + '...' if len(HF_API_TOKEN) > 8 else '***'
-    logger.info('HF_API_TOKEN loaded: %s (len=%d)', token_preview, len(HF_API_TOKEN))
+    token_preview = HF_TOKEN[:8] + '...' if len(HF_TOKEN) > 8 else '***'
+    logger.info('HF_TOKEN loaded: %s (len=%d)', token_preview, len(HF_TOKEN))
 
 if not HF_API_URL:
     logger.info('HF_API_URL not set; will use gradio_client only (recommended)')
@@ -98,7 +97,7 @@ HF_MAX_RETRIES = int(os.environ.get('HF_MAX_RETRIES', '5'))
 # Gradio/Space settings
 HF_SPACE = os.environ.get('HF_SPACE', 'mingg93/fgoslib-qwen3')
 HF_API_NAME = os.environ.get('HF_API_NAME', '/solve_problem')
-# Enforce using gradio_client with a provided HF_API_TOKEN only. No HTTP fallback allowed.
+# Enforce using gradio_client with a provided HF_TOKEN only. No HTTP fallback allowed.
 USE_GRADIO_CLIENT = True
 HF_ALLOW_HTTP_FALLBACK = False
 
@@ -183,7 +182,7 @@ def send_telegram_document(chat_id: int, file_bytes: bytes, filename: str = 'sol
 
 def call_hf_api(payload: dict) -> dict:
     """POST payload to HF API URL and return response JSON."""
-    headers = {'Authorization': f'Bearer {HF_API_TOKEN}'} if HF_API_TOKEN else {}
+    headers = {'Authorization': f'Bearer {HF_TOKEN}'} if HF_TOKEN else {}
     urls_to_try = []
     if HF_API_URL:
         # only try HF_API_URL directly if it looks like an API endpoint
@@ -277,32 +276,31 @@ def call_hf_via_gradio_client(task_text: str, images: list, user_prompt: str):
     """
     if Client is None:
         raise RuntimeError('gradio_client is not installed')
-    # If HF_API_TOKEN is provided in env, pass it to gradio_client.Client so
+    # If HF_TOKEN is provided in env, pass it to gradio_client.Client so
     # requests to ZeroGPU spaces are made with the authenticated token and
     # consume the account's quota/priority rather than unauthenticated quota.
-    # Require HF_API_TOKEN so requests are made on behalf of the configured HF account.
-    if not HF_API_TOKEN:
-        logger.error('HF_API_TOKEN is required for gradio_client calls')
-        raise RuntimeError('HF_API_TOKEN is required')
+    # Require HF_TOKEN so requests are made on behalf of the configured HF account.
+    if not HF_TOKEN:
+        logger.error('HF_TOKEN is required for gradio_client calls')
+        raise RuntimeError('HF_TOKEN is required')
     
-    token_preview = HF_API_TOKEN[:8] + '...' if len(HF_API_TOKEN) > 8 else '***'
+    token_preview = HF_TOKEN[:8] + '...' if len(HF_TOKEN) > 8 else '***'
     logger.info('Creating gradio Client for space=%s with token=%s', HF_SPACE, token_preview)
     
-    # Prefer creating a plain Client(HF_SPACE) and let gradio_client read HF_API_TOKEN
+    # Prefer creating a plain Client(HF_SPACE) and let gradio_client read HF_TOKEN
     # from the environment. This matches the local snippet used during testing:
     #
     # from gradio_client import Client, handle_file
     # client = Client("mingg93/fgoslib-qwen3")
     # result = client.predict(..., api_name="/solve_problem")
     #
-    # Ensure HF_API_TOKEN is exported so Client uses the authenticated token.
+    # Ensure HF_TOKEN is exported so Client uses the authenticated token.
     try:
         # Ensure env vars are present before Client() attempts to resolve the space
         try:
-            if HF_API_TOKEN:
-                os.environ.setdefault('HF_TOKEN', HF_API_TOKEN)
-                os.environ.setdefault('HUGGINGFACE_HUB_TOKEN', HF_API_TOKEN)
-                os.environ.setdefault('HF_API_TOKEN', HF_API_TOKEN)
+            if HF_TOKEN:
+                os.environ.setdefault('HF_TOKEN', HF_TOKEN)
+                os.environ.setdefault('HUGGINGFACE_HUB_TOKEN', HF_TOKEN)
                 logger.info('Exported HF env vars before Client creation (prefix=%s)', token_preview)
         except Exception:
             logger.exception('Failed to set HF env vars before client creation')
@@ -311,10 +309,10 @@ def call_hf_via_gradio_client(task_text: str, images: list, user_prompt: str):
         # Try passing token as constructor kwarg with several common names
         candidates = ['token', 'hf_token', 'api_token', 'auth', 'hf_api_token']
         tried = []
-        if HF_API_TOKEN:
+        if HF_TOKEN:
             for name in candidates:
                 try:
-                    kwargs = {name: HF_API_TOKEN}
+                    kwargs = {name: HF_TOKEN}
                     client = Client(HF_SPACE, **kwargs)
                     logger.info('Gradio Client created with constructor kwarg %s', name)
                     break
@@ -326,12 +324,11 @@ def call_hf_via_gradio_client(task_text: str, images: list, user_prompt: str):
                     client = None
             # final fallback: set multiple env vars and try plain Client()
             if client is None:
-                os.environ['HF_API_TOKEN'] = HF_API_TOKEN
-                # also set common huggingface_hub env names
-                os.environ['HUGGINGFACE_HUB_TOKEN'] = HF_API_TOKEN
-                os.environ['HF_TOKEN'] = HF_API_TOKEN
-                token_preview = HF_API_TOKEN[:8] + '...' if len(HF_API_TOKEN) > 8 else '***'
-                logger.info('HF_API_TOKEN set in env for gradio_client: %s', token_preview)
+                # ensure env var is present for older clients that read it from env
+                os.environ['HF_TOKEN'] = HF_TOKEN
+                os.environ['HUGGINGFACE_HUB_TOKEN'] = HF_TOKEN
+                token_preview = HF_TOKEN[:8] + '...' if len(HF_TOKEN) > 8 else '***'
+                logger.info('HF_TOKEN set in env for gradio_client: %s', token_preview)
                 try:
                     client = Client(HF_SPACE)
                     logger.info('Gradio Client created successfully for space=%s using env var fallback', HF_SPACE)
@@ -346,7 +343,7 @@ def call_hf_via_gradio_client(task_text: str, images: list, user_prompt: str):
         try:
             try:
                 who = requests.get('https://huggingface.co/api/whoami-v2',
-                                   headers={'Authorization': f'Bearer {HF_API_TOKEN}'},
+                                   headers={'Authorization': f'Bearer {HF_TOKEN}'},
                                    timeout=8)
                 try:
                     j = who.json()

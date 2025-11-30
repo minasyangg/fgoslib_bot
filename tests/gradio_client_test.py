@@ -2,7 +2,7 @@
 Тестовый скрипт для проверки подключения к Hugging Face Space через gradio_client.
 Запуск:
 
-HF_SPACE и при необходимости HF_API_TOKEN должны быть в окружении, или переданы через аргументы.
+HF_SPACE и при необходимости HF_TOKEN должны быть в окружении, или переданы через аргументы.
 
 Пример:
 HF_SPACE=mingg93/fgoslib-qwen3 python tests/gradio_client_test.py
@@ -29,7 +29,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--space', '-s', default=os.environ.get('HF_SPACE'), help='HF Space id (owner/repo)')
     p.add_argument('--api-name', '-a', default=os.environ.get('HF_API_NAME', '/solve_problem'))
-    p.add_argument('--token', '-t', default=os.environ.get('HF_API_TOKEN'))
+    p.add_argument('--token', '-t', default=os.environ.get('HF_TOKEN'))
     args = p.parse_args()
 
     if not args.space:

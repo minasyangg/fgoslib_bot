@@ -2,9 +2,9 @@
 Пример вызова HF Space через gradio_client.Client.
 
 Использование:
-  HF_SPACE=mingg93/fgoslib-qwen3 HF_API_TOKEN=<token> python tests/gradio_client_example.py
+    HF_SPACE=mingg93/fgoslib-qwen3 HF_TOKEN=<token> python tests/gradio_client_example.py
 или
-  python tests/gradio_client_example.py --space mingg93/fgoslib-qwen3 --token <token>
+    python tests/gradio_client_example.py --space mingg93/fgoslib-qwen3 --token <token>
 
 Сценарии:
  - показывает, как передать `text_input` и `image_input` (через `handle_file`)
@@ -93,7 +93,7 @@ def call_space(space: str, token: str | None, text_input: str, image_path: str |
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('--space', '-s', default=os.environ.get('HF_SPACE'))
-    p.add_argument('--token', '-t', default=os.environ.get('HF_API_TOKEN'))
+    p.add_argument('--token', '-t', default=os.environ.get('HF_TOKEN'))
     p.add_argument('--image', '-i', default=None)
     p.add_argument('--api-name', '-a', default=os.environ.get('HF_API_NAME', '/solve_problem'))
     args = p.parse_args()
