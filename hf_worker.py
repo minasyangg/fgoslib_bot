@@ -297,12 +297,51 @@ def call_hf_via_gradio_client(task_text: str, images: list, user_prompt: str):
     #
     # Ensure HF_API_TOKEN is exported so Client uses the authenticated token.
     try:
+        # Ensure env vars are present before Client() attempts to resolve the space
+        try:
+            if HF_API_TOKEN:
+                os.environ.setdefault('HF_TOKEN', HF_API_TOKEN)
+                os.environ.setdefault('HUGGINGFACE_HUB_TOKEN', HF_API_TOKEN)
+                os.environ.setdefault('HF_API_TOKEN', HF_API_TOKEN)
+                logger.info('Exported HF env vars before Client creation (prefix=%s)', token_preview)
+        except Exception:
+            logger.exception('Failed to set HF env vars before client creation')
+
+        client = None
+        # Try passing token as constructor kwarg with several common names
+        candidates = ['token', 'hf_token', 'api_token', 'auth', 'hf_api_token']
+        tried = []
         if HF_API_TOKEN:
-            os.environ['HF_API_TOKEN'] = HF_API_TOKEN
-            token_preview = HF_API_TOKEN[:8] + '...' if len(HF_API_TOKEN) > 8 else '***'
-            logger.info('HF_API_TOKEN set in env for gradio_client: %s', token_preview)
-        client = Client(HF_SPACE)
-        logger.info('Gradio Client created successfully for space=%s', HF_SPACE)
+            for name in candidates:
+                try:
+                    kwargs = {name: HF_API_TOKEN}
+                    client = Client(HF_SPACE, **kwargs)
+                    logger.info('Gradio Client created with constructor kwarg %s', name)
+                    break
+                except TypeError:
+                    tried.append(name)
+                    continue
+                except Exception:
+                    logger.exception('Failed to create gradio Client with kwarg %s', name)
+                    client = None
+            # final fallback: set multiple env vars and try plain Client()
+            if client is None:
+                os.environ['HF_API_TOKEN'] = HF_API_TOKEN
+                # also set common huggingface_hub env names
+                os.environ['HUGGINGFACE_HUB_TOKEN'] = HF_API_TOKEN
+                os.environ['HF_TOKEN'] = HF_API_TOKEN
+                token_preview = HF_API_TOKEN[:8] + '...' if len(HF_API_TOKEN) > 8 else '***'
+                logger.info('HF_API_TOKEN set in env for gradio_client: %s', token_preview)
+                try:
+                    client = Client(HF_SPACE)
+                    logger.info('Gradio Client created successfully for space=%s using env var fallback', HF_SPACE)
+                except Exception:
+                    logger.exception('Failed to create gradio Client with env var fallback')
+                    raise
+        else:
+            # No token provided; attempt plain Client()
+            client = Client(HF_SPACE)
+            logger.info('Gradio Client created successfully for space=%s (no token)', HF_SPACE)
         # Diagnostic: check whoami with the token and log a short client repr
         try:
             try:
