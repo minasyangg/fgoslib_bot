@@ -255,6 +255,14 @@ def call_hf_via_gradio_client(task_text: str, images: list, user_prompt: str):
 
     # call gradio client
     try:
+        # debug: log what we send to the Space (helps verify parity with local test)
+        try:
+            logger.debug('gradio predict args: api_name=%s, text_len=%s, image_input_preview=%s',
+                         HF_API_NAME, len(task_text or ''), repr(image_input)[:400])
+        except Exception:
+            # don't fail if debug logging fails
+            logger.debug('gradio predict args: (failed to build preview)')
+
         res = client.predict(
             text_input=task_text,
             image_input=image_input,
