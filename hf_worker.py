@@ -70,8 +70,15 @@ HF_API_TOKEN = os.environ.get('HF_API_TOKEN')
 HF_API_URL = os.environ.get('HF_API_URL')
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 
-if not HF_API_TOKEN or not HF_API_URL:
-    logger.warning('HF_API_TOKEN or HF_API_URL not set; HF calls will fail until provided')
+if not HF_API_TOKEN:
+    logger.warning('HF_API_TOKEN not set; gradio_client calls will fail')
+else:
+    # Log masked token prefix to verify it's loaded correctly
+    token_preview = HF_API_TOKEN[:8] + '...' if len(HF_API_TOKEN) > 8 else '***'
+    logger.info('HF_API_TOKEN loaded: %s (len=%d)', token_preview, len(HF_API_TOKEN))
+
+if not HF_API_URL:
+    logger.info('HF_API_URL not set; will use gradio_client only (recommended)')
 
 if not TELEGRAM_TOKEN:
     logger.warning('TELEGRAM_TOKEN not set; cannot send Telegram messages')
@@ -89,8 +96,9 @@ HF_MAX_RETRIES = int(os.environ.get('HF_MAX_RETRIES', '5'))
 # Gradio/Space settings
 HF_SPACE = os.environ.get('HF_SPACE', 'mingg93/fgoslib-qwen3')
 HF_API_NAME = os.environ.get('HF_API_NAME', '/solve_problem')
-USE_GRADIO_CLIENT = os.environ.get('HF_USE_GRADIO_CLIENT', 'true').lower() in ('1', 'true', 'yes')
-HF_ALLOW_HTTP_FALLBACK = os.environ.get('HF_ALLOW_HTTP_FALLBACK', 'false').lower() in ('1', 'true', 'yes')
+# Enforce using gradio_client with a provided HF_API_TOKEN only. No HTTP fallback allowed.
+USE_GRADIO_CLIENT = True
+HF_ALLOW_HTTP_FALLBACK = False
 
 # Very small blacklist for extra prompts (simple approach)
 BLACKLIST = [
@@ -270,22 +278,20 @@ def call_hf_via_gradio_client(task_text: str, images: list, user_prompt: str):
     # If HF_API_TOKEN is provided in env, pass it to gradio_client.Client so
     # requests to ZeroGPU spaces are made with the authenticated token and
     # consume the account's quota/priority rather than unauthenticated quota.
+    # Require HF_API_TOKEN so requests are made on behalf of the configured HF account.
+    if not HF_API_TOKEN:
+        logger.error('HF_API_TOKEN is required for gradio_client calls')
+        raise RuntimeError('HF_API_TOKEN is required')
+    
+    token_preview = HF_API_TOKEN[:8] + '...' if len(HF_API_TOKEN) > 8 else '***'
+    logger.info('Creating gradio Client for space=%s with token=%s', HF_SPACE, token_preview)
+    
     try:
-        if HF_API_TOKEN:
-            client = Client(HF_SPACE, hf_token=HF_API_TOKEN)
-            try:
-                logger.debug('Created gradio Client with HF_API_TOKEN (masked).')
-            except Exception:
-                pass
-        else:
-            client = Client(HF_SPACE)
+        client = Client(HF_SPACE, hf_token=HF_API_TOKEN)
+        logger.info('Gradio Client created successfully, space=%s', HF_SPACE)
     except Exception:
-        # fallback to basic client creation if something goes wrong
-        try:
-            client = Client(HF_SPACE)
-        except Exception:
-            logger.exception('Failed to create gradio Client')
-            raise
+        logger.exception('Failed to create gradio Client')
+        raise
     # prepare image_input: Gradio Image component expects dict with 'path' or 'url'
     image_input = None
     if images:
@@ -449,7 +455,7 @@ def process_task(item: dict):
     last_err = None
     while attempt <= RETRIES:
         try:
-            # prefer gradio_client when configured
+            # prefer gradio_client only and DO NOT fallback to HTTP
             resp = None
             if USE_GRADIO_CLIENT:
                 try:
@@ -513,8 +519,15 @@ def process_task(item: dict):
                     logger.info('gradio_client failed; HF_ALLOW_HTTP_FALLBACK enabled and HF_API_URL looks like API — falling back to HTTP')
                     resp = None
             if resp is None:
-                # fallback to previous HTTP approach
-                resp = call_hf_api(payload)
+                # Do not attempt any HTTP fallback; surface the error instead
+                logger.error('No response from gradio_client for task %s and HTTP fallback disabled', task_id)
+                save_result_to_redis(task_id, {'status': 'error', 'error': 'no_gradio_response'})
+                if TG_API_BASE and chat_id:
+                    try:
+                        requests.post(TG_API_BASE + 'sendMessage', data={'chat_id': str(chat_id), 'text': 'Ошибка интеграции с сервисом генерации (нет ответа от API). Попробуйте позже.'}, timeout=10)
+                    except Exception:
+                        logger.exception('Failed to notify user about no_gradio_response')
+                return
             # response handling: look for pdf_url or pdf_base64
             if not resp:
                 raise RuntimeError('empty response from HF')
