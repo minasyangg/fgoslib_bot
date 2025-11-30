@@ -39,9 +39,10 @@ try:
 except Exception:
     web = None
 try:
-    from gradio_client import Client
+    from gradio_client import Client, handle_file
 except Exception:
     Client = None
+    handle_file = None
 
 try:
     # AppError class exists in gradio_client package
@@ -286,50 +287,24 @@ def call_hf_via_gradio_client(task_text: str, images: list, user_prompt: str):
     token_preview = HF_API_TOKEN[:8] + '...' if len(HF_API_TOKEN) > 8 else '***'
     logger.info('Creating gradio Client for space=%s with token=%s', HF_SPACE, token_preview)
     
+    # Prefer creating a plain Client(HF_SPACE) and let gradio_client read HF_API_TOKEN
+    # from the environment. This matches the local snippet used during testing:
+    #
+    # from gradio_client import Client, handle_file
+    # client = Client("mingg93/fgoslib-qwen3")
+    # result = client.predict(..., api_name="/solve_problem")
+    #
+    # Ensure HF_API_TOKEN is exported so Client uses the authenticated token.
     try:
-        client = Client(HF_SPACE, hf_token=HF_API_TOKEN)
-        logger.info('Gradio Client created successfully, space=%s', HF_SPACE)
+        if HF_API_TOKEN:
+            os.environ['HF_API_TOKEN'] = HF_API_TOKEN
+            token_preview = HF_API_TOKEN[:8] + '...' if len(HF_API_TOKEN) > 8 else '***'
+            logger.info('HF_API_TOKEN set in env for gradio_client: %s', token_preview)
+        client = Client(HF_SPACE)
+        logger.info('Gradio Client created successfully for space=%s', HF_SPACE)
     except Exception:
         logger.exception('Failed to create gradio Client')
         raise
-        # Try to construct Client with a token keyword that the installed gradio_client accepts.
-        # Different gradio_client versions may expect different kwarg names, so inspect the
-        # constructor signature and try a few common names before falling back to plain Client().
-        import inspect
-        ctor = getattr(Client, '__init__', None)
-        tried = []
-        client = None
-        if ctor is not None:
-            sig = inspect.signature(ctor)
-            params = sig.parameters
-            # common token kwarg candidates
-            candidates = ['hf_token', 'api_token', 'token', 'auth', 'hf_api_token']
-            for name in candidates:
-                if name in params:
-                    tried.append(name)
-                    try:
-                        kwargs = {name: HF_API_TOKEN}
-                        client = Client(HF_SPACE, **kwargs)
-                        logger.info('Gradio Client created with kwarg %s', name)
-                        break
-                    except TypeError:
-                        # try next candidate
-                        logger.debug('Client did not accept kwarg %s', name)
-                        client = None
-                    except Exception:
-                        logger.exception('Failed to create gradio Client with kwarg %s', name)
-                        client = None
-
-        # final fallback: plain Client() relying on env var
-        if client is None:
-            try:
-                # ensure env var is present for older clients that read it from env
-                os.environ['HF_API_TOKEN'] = HF_API_TOKEN
-                client = Client(HF_SPACE)
-                logger.info('Gradio Client created without explicit token kwarg; relying on env var')
-            except Exception:
-                logger.exception('Failed to create gradio Client (all attempts)')
-                raise
     # prepare image_input: Gradio Image component expects dict with 'path' or 'url'
     image_input = None
     if images:
