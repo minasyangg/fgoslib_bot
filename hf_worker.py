@@ -30,6 +30,7 @@ import base64
 import requests
 import threading
 import asyncio
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 
 import redis
@@ -645,6 +646,15 @@ def process_task(item: dict):
 
 def main():
     logger.info('Starting hf_worker, concurrency=%s', WORKER_CONCURRENCY)
+    # Diagnostic: log sha256 of this file to help confirm deployed version
+    try:
+        p = os.path.abspath(__file__)
+        with open(p, 'rb') as fh:
+            data = fh.read()
+        h = hashlib.sha256(data).hexdigest()
+        logger.info('hf_worker.py sha256=%s', h[:12])
+    except Exception:
+        logger.exception('Failed to compute hf_worker.py sha256')
 
     # start health server (non-blocking) so Render sees the service as a web service
     def start_health():
