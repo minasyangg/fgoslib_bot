@@ -221,7 +221,25 @@ def call_hf_via_gradio_client(task_text: str, images: list, user_prompt: str):
     """
     if Client is None:
         raise RuntimeError('gradio_client is not installed')
-    client = Client(HF_SPACE)
+    # If HF_API_TOKEN is provided in env, pass it to gradio_client.Client so
+    # requests to ZeroGPU spaces are made with the authenticated token and
+    # consume the account's quota/priority rather than unauthenticated quota.
+    try:
+        if HF_API_TOKEN:
+            client = Client(HF_SPACE, hf_token=HF_API_TOKEN)
+            try:
+                logger.debug('Created gradio Client with HF_API_TOKEN (masked).')
+            except Exception:
+                pass
+        else:
+            client = Client(HF_SPACE)
+    except Exception:
+        # fallback to basic client creation if something goes wrong
+        try:
+            client = Client(HF_SPACE)
+        except Exception:
+            logger.exception('Failed to create gradio Client')
+            raise
     # prepare image_input: Gradio Image component expects dict with 'path' or 'url'
     image_input = None
     if images:
