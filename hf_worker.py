@@ -319,7 +319,7 @@ def call_hf_via_gradio_client(task_text: str, images: list, user_prompt: str):
             elif img.startswith('data:'):
                 # save data url to temp file
                 try:
-                    import base64, tempfile, os, re
+                    import base64, tempfile, re
                     header, b64 = img.split(',', 1)
                     ext = '.png'
                     m = re.search(r'data:image/([a-zA-Z0-9]+);', header)
