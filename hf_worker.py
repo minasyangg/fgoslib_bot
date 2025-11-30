@@ -89,6 +89,7 @@ RETRIES = int(os.environ.get('HF_RETRIES', '2'))
 HF_SPACE = os.environ.get('HF_SPACE', 'mingg93/fgoslib-qwen3')
 HF_API_NAME = os.environ.get('HF_API_NAME', '/solve_problem')
 USE_GRADIO_CLIENT = os.environ.get('HF_USE_GRADIO_CLIENT', 'true').lower() in ('1', 'true', 'yes')
+HF_ALLOW_HTTP_FALLBACK = os.environ.get('HF_ALLOW_HTTP_FALLBACK', 'false').lower() in ('1', 'true', 'yes')
 
 # Very small blacklist for extra prompts (simple approach)
 BLACKLIST = [
@@ -422,7 +423,30 @@ def process_task(item: dict):
                             logger.exception('Failed to notify user about quota')
                     return
                 except Exception:
-                    logger.exception('gradio_client call failed, falling back to HTTP')
+                    # Non-quota error from gradio_client. By default we DO NOT fallback to HTTP
+                    # to avoid sending POSTs to non-API pages (causing 405). Only fallback
+                    # when explicitly allowed via HF_ALLOW_HTTP_FALLBACK and HF_API_URL looks
+                    # like an API endpoint.
+                    logger.exception('gradio_client call failed')
+                    save_result_to_redis(task_id, {'status': 'error', 'error': 'gradio_client_failed'})
+                    if not HF_ALLOW_HTTP_FALLBACK:
+                        if TG_API_BASE and chat_id:
+                            try:
+                                requests.post(TG_API_BASE + 'sendMessage', data={'chat_id': str(chat_id), 'text': 'Ошибка интеграции с сервисом генерации (gradio client). Попробуйте позже.'}, timeout=10)
+                            except Exception:
+                                logger.exception('Failed to notify user about gradio_client failure')
+                        return
+                    # HF_ALLOW_HTTP_FALLBACK is true — ensure HF_API_URL looks like API
+                    if not HF_API_URL or '/api/' not in HF_API_URL:
+                        logger.warning('HF_API_URL not configured as API endpoint; skipping HTTP fallback')
+                        save_result_to_redis(task_id, {'status': 'error', 'error': 'no_http_fallback_available'})
+                        if TG_API_BASE and chat_id:
+                            try:
+                                requests.post(TG_API_BASE + 'sendMessage', data={'chat_id': str(chat_id), 'text': 'Интеграция с HF настроена некорректно (нет HTTP fallback).'}, timeout=10)
+                            except Exception:
+                                logger.exception('Failed to notify user about missing HTTP fallback')
+                        return
+                    logger.info('gradio_client failed; HF_ALLOW_HTTP_FALLBACK enabled and HF_API_URL looks like API — falling back to HTTP')
                     resp = None
             if resp is None:
                 # fallback to previous HTTP approach
