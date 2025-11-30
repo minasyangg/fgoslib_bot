@@ -84,6 +84,7 @@ REDIS_TTL = int(os.environ.get('REDIS_TTL', '900'))
 WORKER_CONCURRENCY = int(os.environ.get('WORKER_CONCURRENCY', '3'))
 HF_TIMEOUT = int(os.environ.get('HF_TIMEOUT', '180'))
 RETRIES = int(os.environ.get('HF_RETRIES', '2'))
+HF_MAX_RETRIES = int(os.environ.get('HF_MAX_RETRIES', '5'))
 
 # Gradio/Space settings
 HF_SPACE = os.environ.get('HF_SPACE', 'mingg93/fgoslib-qwen3')
@@ -98,6 +99,46 @@ BLACKLIST = [
 ]
 
 TG_API_BASE = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/' if TELEGRAM_TOKEN else None
+
+
+def schedule_delayed_task(task_obj: dict, delay_seconds: int):
+    """Schedule a task for later execution using a Redis sorted set.
+    score = unix timestamp when task becomes ready.
+    """
+    try:
+        ready_at = int(time.time() + max(0, int(delay_seconds)))
+        r.zadd('hf_delayed', {json.dumps(task_obj): ready_at})
+        logger.info('Scheduled task %s for retry at %s (in %s s)', task_obj.get('task_id'), ready_at, delay_seconds)
+    except Exception:
+        logger.exception('Failed to schedule delayed task')
+
+
+def move_due_delayed_tasks():
+    """Background loop: move due tasks from `hf_delayed` to `hf_queue`.
+    Runs in a daemon thread.
+    """
+    try:
+        while True:
+            try:
+                now = int(time.time())
+                # get tasks with score <= now
+                items = r.zrangebyscore('hf_delayed', 0, now)
+                if items:
+                    for v in items:
+                        try:
+                            # remove from delayed set and push back to queue
+                            removed = r.zrem('hf_delayed', v)
+                            if removed:
+                                r.lpush('hf_queue', v)
+                                logger.info('Moved delayed task back to hf_queue')
+                        except Exception:
+                            logger.exception('Failed to move delayed task')
+                time.sleep(5)
+            except Exception:
+                logger.exception('Delayed-task mover error')
+                time.sleep(5)
+    except Exception:
+        logger.exception('Delayed-task mover fatal error')
 
 
 def moderate_prompt(prompt: str) -> bool:
@@ -410,17 +451,36 @@ def process_task(item: dict):
                 try:
                     resp = call_hf_via_gradio_client(payload['task_text'], payload.get('images', []), payload.get('user_prompt', ''))
                 except HFQuotaError as qe:
-                    # Service quota exhausted — record and notify user, do not fallback to HTTP
+                    # Service quota exhausted — schedule retry with backoff
                     logger.warning('HF quota error for task %s: %s', task_id, qe)
-                    save_result_to_redis(task_id, {'status': 'quota', 'error': str(qe), 'retry_after': qe.retry_after_seconds})
+                    # determine current retry count (stored in payload)
+                    retry_count = int(item.get('retry_count', 0))
+                    retry_count += 1
+                    # if HF provides explicit retry_after, use it, otherwise exponential backoff
+                    if qe.retry_after_seconds and qe.retry_after_seconds > 0:
+                        delay = qe.retry_after_seconds
+                    else:
+                        delay = min(3600, 60 * (2 ** (retry_count - 1)))
+                    if retry_count > HF_MAX_RETRIES:
+                        logger.warning('Max retries exceeded for task %s; giving up', task_id)
+                        save_result_to_redis(task_id, {'status': 'quota_exhausted', 'error': str(qe)})
+                        if TG_API_BASE and chat_id:
+                            try:
+                                requests.post(TG_API_BASE + 'sendMessage', data={'chat_id': str(chat_id), 'text': 'Генерация временно недоступна (квота исчерпана). Попробуйте позже.'}, timeout=10)
+                            except Exception:
+                                logger.exception('Failed to notify user about final quota')
+                        return
+                    # prepare task for requeue
+                    new_task = dict(item)
+                    new_task['retry_count'] = retry_count
+                    # schedule into delayed set
+                    schedule_delayed_task(new_task, delay)
+                    save_result_to_redis(task_id, {'status': 'scheduled_retry', 'retry_count': retry_count, 'next_try_in': delay})
                     if TG_API_BASE and chat_id:
                         try:
-                            text = 'Сервис генерации временно недоступен (превышена квота). Попробуйте позже.'
-                            if qe.retry_after_seconds:
-                                text += f' Примерно через {qe.retry_after_seconds//3600} ч.'
-                            requests.post(TG_API_BASE + 'sendMessage', data={'chat_id': str(chat_id), 'text': text}, timeout=10)
+                            requests.post(TG_API_BASE + 'sendMessage', data={'chat_id': str(chat_id), 'text': f'Квота исчерпана — задача повторно запланирована через {delay} сек.'}, timeout=10)
                         except Exception:
-                            logger.exception('Failed to notify user about quota')
+                            logger.exception('Failed to notify user about scheduled retry')
                     return
                 except Exception:
                     # Non-quota error from gradio_client. By default we DO NOT fallback to HTTP
@@ -597,6 +657,14 @@ def main():
         t.start()
 
     start_health()
+
+    # start delayed-task mover thread
+    try:
+        mover = threading.Thread(target=move_due_delayed_tasks, daemon=True)
+        mover.start()
+        logger.info('Started delayed-task mover thread')
+    except Exception:
+        logger.exception('Failed to start delayed-task mover')
 
     executor = ThreadPoolExecutor(max_workers=WORKER_CONCURRENCY)
     try:
