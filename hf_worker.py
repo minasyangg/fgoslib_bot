@@ -292,6 +292,44 @@ def call_hf_via_gradio_client(task_text: str, images: list, user_prompt: str):
     except Exception:
         logger.exception('Failed to create gradio Client')
         raise
+        # Try to construct Client with a token keyword that the installed gradio_client accepts.
+        # Different gradio_client versions may expect different kwarg names, so inspect the
+        # constructor signature and try a few common names before falling back to plain Client().
+        import inspect
+        ctor = getattr(Client, '__init__', None)
+        tried = []
+        client = None
+        if ctor is not None:
+            sig = inspect.signature(ctor)
+            params = sig.parameters
+            # common token kwarg candidates
+            candidates = ['hf_token', 'api_token', 'token', 'auth', 'hf_api_token']
+            for name in candidates:
+                if name in params:
+                    tried.append(name)
+                    try:
+                        kwargs = {name: HF_API_TOKEN}
+                        client = Client(HF_SPACE, **kwargs)
+                        logger.info('Gradio Client created with kwarg %s', name)
+                        break
+                    except TypeError:
+                        # try next candidate
+                        logger.debug('Client did not accept kwarg %s', name)
+                        client = None
+                    except Exception:
+                        logger.exception('Failed to create gradio Client with kwarg %s', name)
+                        client = None
+
+        # final fallback: plain Client() relying on env var
+        if client is None:
+            try:
+                # ensure env var is present for older clients that read it from env
+                os.environ['HF_API_TOKEN'] = HF_API_TOKEN
+                client = Client(HF_SPACE)
+                logger.info('Gradio Client created without explicit token kwarg; relying on env var')
+            except Exception:
+                logger.exception('Failed to create gradio Client (all attempts)')
+                raise
     # prepare image_input: Gradio Image component expects dict with 'path' or 'url'
     image_input = None
     if images:
