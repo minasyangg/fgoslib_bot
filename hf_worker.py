@@ -199,25 +199,14 @@ def moderate_prompt(prompt: str) -> tuple:
 
 
 def send_telegram_document(chat_id: int, file_bytes: bytes, filename: str = 'solution.pdf', task_id: str = None) -> bool:
-    """Отправить документ в Telegram с кнопкой 'Просмотреть'."""
+    """Отправить документ в Telegram."""
     if not TG_API_BASE:
         logger.warning('Telegram token not set; cannot send file')
         return False
     try:
         files = {'document': (filename, file_bytes, 'application/pdf')}
         data = {'chat_id': str(chat_id)}
-        
-        # Добавляем inline кнопку "Просмотреть" если есть task_id
-        if task_id:
-            monitor_url = os.environ.get('MONITOR_BASE_URL', '')
-            if monitor_url:
-                view_url = f"{monitor_url}/task/{task_id}"
-                keyboard = {
-                    "inline_keyboard": [[
-                        {"text": "👁 Просмотреть", "url": view_url}
-                    ]]
-                }
-                data['reply_markup'] = json.dumps(keyboard)
+        # Inline кнопки не добавляем — файл уже у пользователя
         
         resp = requests.post(TG_API_BASE + 'sendDocument', data=data, files=files, timeout=30)
         if resp.status_code // 100 == 2:
