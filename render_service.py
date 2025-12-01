@@ -279,6 +279,9 @@ async def render_task(task_id: str):
 
 async def notify_user_with_file(task_id: str, file_bytes: bytes, is_pdf: bool):
     # Try to send the generated file to the assignee via Telegram Bot API
+    # Проверяем — это решение (hf_render:*) или задание
+    is_solution = task_id.startswith('hf_render:')
+    
     try:
         assignee = r.get(f"task_assignee:{task_id}")
         if assignee:
@@ -292,23 +295,36 @@ async def notify_user_with_file(task_id: str, file_bytes: bytes, is_pdf: bool):
                     api = url + 'sendPhoto'
                     files = {'photo': (f'task_{task_id}.png', file_bytes, 'image/png')}
                 data = {'chat_id': chat_id}
-                # attach inline keyboard so user immediately sees actions when file arrives
-                try:
-                    import json as _json
-                    reply_markup = {
-                        'inline_keyboard': [[
-                            {'text': 'Решить', 'callback_data': f'solve:{task_id}'},
-                            {'text': 'Удалить', 'callback_data': f'del:{task_id}'}
-                        ]]
-                    }
-                    data['reply_markup'] = _json.dumps(reply_markup, ensure_ascii=False)
-                except Exception:
-                    logger.exception('Failed to build reply_markup')
+                
+                # Inline кнопки только для заданий, не для решений
+                if not is_solution:
+                    try:
+                        import json as _json
+                        reply_markup = {
+                            'inline_keyboard': [[
+                                {'text': 'Решить', 'callback_data': f'solve:{task_id}'},
+                                {'text': 'Удалить', 'callback_data': f'del:{task_id}'}
+                            ]]
+                        }
+                        data['reply_markup'] = _json.dumps(reply_markup, ensure_ascii=False)
+                    except Exception:
+                        logger.exception('Failed to build reply_markup')
+                
                 resp = requests.post(api, data=data, files=files, timeout=30)
                 if resp.status_code // 100 != 2:
                     logger.warning('Telegram send failed: %s %s', resp.status_code, resp.text)
                 else:
                     logger.info('Sent rendered file to user %s for task %s', chat_id, task_id)
+                    # Если это решение — отправить сообщение "Задача решена"
+                    if is_solution:
+                        try:
+                            requests.post(url + 'sendMessage', data={
+                                'chat_id': chat_id,
+                                'text': '✅ Задача решена! 👆👁',
+                                'parse_mode': 'HTML'
+                            }, timeout=10)
+                        except Exception:
+                            logger.exception('Failed to send completion message')
             else:
                 logger.info('TELEGRAM_TOKEN not set; skipping send to user %s for task %s', assignee, task_id)
         else:
