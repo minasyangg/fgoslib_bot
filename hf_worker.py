@@ -524,6 +524,67 @@ def save_result_to_redis(task_id: str, result: dict):
         logger.exception('Failed to save result to redis')
 
 
+# --- Периодические уведомления о статусе задачи ---
+NOTIFICATION_INTERVAL = int(os.environ.get('NOTIFICATION_INTERVAL', '10'))  # секунд
+
+
+def send_status_notification(chat_id: int, message: str):
+    """Отправить уведомление о статусе в Telegram."""
+    if not TG_API_BASE or not chat_id:
+        return
+    try:
+        requests.post(
+            TG_API_BASE + 'sendMessage',
+            data={'chat_id': str(chat_id), 'text': message, 'parse_mode': 'HTML'},
+            timeout=10
+        )
+    except Exception:
+        logger.exception('Failed to send status notification')
+
+
+class TaskProgressNotifier:
+    """Фоновый поток для периодических уведомлений о статусе задачи."""
+    
+    def __init__(self, chat_id: int, task_id: str, interval: int = NOTIFICATION_INTERVAL):
+        self.chat_id = chat_id
+        self.task_id = task_id
+        self.interval = interval
+        self.status = "⏳ Задача поставлена в очередь ZeroGPU..."
+        self.running = True
+        self.start_time = time.time()
+        self.thread = None
+    
+    def start(self):
+        """Запустить поток уведомлений."""
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+        # Отправить начальное уведомление
+        send_status_notification(self.chat_id, f"🚀 <b>Задача {self.task_id[:8]}...</b>\n{self.status}")
+    
+    def update_status(self, status: str):
+        """Обновить статус (будет отправлен в следующем цикле)."""
+        self.status = status
+    
+    def stop(self, final_message: str = None):
+        """Остановить поток и отправить финальное сообщение."""
+        self.running = False
+        if final_message:
+            elapsed = int(time.time() - self.start_time)
+            send_status_notification(self.chat_id, f"{final_message}\n⏱ Общее время: {elapsed} сек")
+    
+    def _run(self):
+        """Фоновый цикл отправки уведомлений."""
+        notification_count = 0
+        while self.running:
+            time.sleep(self.interval)
+            if not self.running:
+                break
+            notification_count += 1
+            elapsed = int(time.time() - self.start_time)
+            msg = f"⏳ <b>Задача {self.task_id[:8]}...</b>\n{self.status}\n🕐 Прошло: {elapsed} сек"
+            send_status_notification(self.chat_id, msg)
+
+
 def process_task(item: dict):
     task_id = item.get('task_id')
     chat_id = item.get('chat_id')
@@ -600,6 +661,12 @@ def process_task(item: dict):
         'user_prompt': user_prompt
     }
 
+    # Запускаем периодические уведомления о статусе
+    notifier = None
+    if TG_API_BASE and chat_id:
+        notifier = TaskProgressNotifier(chat_id, task_id)
+        notifier.start()
+
     # call HF with retries
     attempt = 0
     last_err = None
@@ -608,6 +675,8 @@ def process_task(item: dict):
             # prefer gradio_client only and DO NOT fallback to HTTP
             resp = None
             if USE_GRADIO_CLIENT:
+                if notifier:
+                    notifier.update_status("🧠 Генерация решения на ZeroGPU...")
                 try:
                     resp = call_hf_via_gradio_client(payload['task_text'], payload.get('images', []), payload.get('user_prompt', ''))
                 except HFQuotaError as qe:
@@ -636,11 +705,8 @@ def process_task(item: dict):
                     # schedule into delayed set
                     schedule_delayed_task(new_task, delay)
                     save_result_to_redis(task_id, {'status': 'scheduled_retry', 'retry_count': retry_count, 'next_try_in': delay})
-                    if TG_API_BASE and chat_id:
-                        try:
-                            requests.post(TG_API_BASE + 'sendMessage', data={'chat_id': str(chat_id), 'text': f'Квота исчерпана — задача повторно запланирована через {delay} сек.'}, timeout=10)
-                        except Exception:
-                            logger.exception('Failed to notify user about scheduled retry')
+                    if notifier:
+                        notifier.stop(f"🔄 Квота ZeroGPU исчерпана. Повтор через {delay} сек.")
                     return
                 except Exception:
                     # Non-quota error from gradio_client. By default we DO NOT fallback to HTTP
@@ -649,6 +715,8 @@ def process_task(item: dict):
                     # like an API endpoint.
                     logger.exception('gradio_client call failed')
                     save_result_to_redis(task_id, {'status': 'error', 'error': 'gradio_client_failed'})
+                    if notifier:
+                        notifier.stop("❌ Ошибка генерации")
                     if not HF_ALLOW_HTTP_FALLBACK:
                         if TG_API_BASE and chat_id:
                             try:
@@ -744,16 +812,15 @@ def process_task(item: dict):
                     # enqueue render
                     r.lpush('render_queue', render_task_id)
                     save_result_to_redis(task_id, {'status': 'render_queued', 'message': 'Markdown received; render queued', 'render_task_id': render_task_id})
-                    if TG_API_BASE and chat_id:
-                        try:
-                            requests.post(TG_API_BASE + 'sendMessage', data={'chat_id': str(chat_id), 'text': 'Решение в MD формате получено — ставлю в очередь на рендер в PDF.'}, timeout=10)
-                        except Exception:
-                            logger.exception('Failed to notify user about queued render')
+                    if notifier:
+                        notifier.stop("📄 Решение получено, рендеринг PDF...")
                     return
                 except Exception:
                     logger.exception('Failed to queue render for markdown result')
 
             if pdf_bytes:
+                if notifier:
+                    notifier.stop("✅ Решение готово!")
                 ok = False
                 if TG_API_BASE and chat_id:
                     ok = send_telegram_document(chat_id, pdf_bytes, filename=f'solution_{task_id}.pdf')
@@ -761,6 +828,8 @@ def process_task(item: dict):
                 save_result_to_redis(task_id, {'status': 'ok', 'pdf_base64': base64.b64encode(pdf_bytes).decode('ascii')})
                 return
             else:
+                if notifier:
+                    notifier.stop("❌ Ошибка: нет PDF")
                 # unreachable normally
                 save_result_to_redis(task_id, {'status': 'error', 'error': 'no_pdf_bytes'})
                 return
@@ -772,6 +841,8 @@ def process_task(item: dict):
             time.sleep(1 + attempt * 2)
 
     # after retries
+    if notifier:
+        notifier.stop("❌ Все попытки исчерпаны")
     save_result_to_redis(task_id, {'status': 'error', 'error': last_err})
     if TG_API_BASE and chat_id:
         try:
