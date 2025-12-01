@@ -94,6 +94,10 @@ HF_TIMEOUT = int(os.environ.get('HF_TIMEOUT', '180'))
 RETRIES = int(os.environ.get('HF_RETRIES', '2'))
 HF_MAX_RETRIES = int(os.environ.get('HF_MAX_RETRIES', '5'))
 
+# Rate limiting settings
+RATE_LIMIT_HF_PER_USER_HOUR = int(os.environ.get('RATE_LIMIT_HF_PER_USER_HOUR', '5'))
+RATE_LIMIT_HF_PER_USER_DAY = int(os.environ.get('RATE_LIMIT_HF_PER_USER_DAY', '20'))
+
 # Gradio/Space settings
 HF_SPACE = os.environ.get('HF_SPACE', 'mingg93/fgoslib-qwen3')
 HF_API_NAME = os.environ.get('HF_API_NAME', '/solve_problem')
@@ -101,13 +105,41 @@ HF_API_NAME = os.environ.get('HF_API_NAME', '/solve_problem')
 USE_GRADIO_CLIENT = True
 HF_ALLOW_HTTP_FALLBACK = False
 
-# Very small blacklist for extra prompts (simple approach)
-BLACKLIST = [
-    'bomb', 'terror', 'drugs', 'sex', 'assault', 'kill', 'murder',
-    'porn', 'hate', 'racist', 'illegal'
+import re
+
+# Improved moderation with regex patterns (word boundaries to avoid false positives)
+PATTERN_BLACKLIST = [
+    r'\bb[o0]mb\b',
+    r'\bterr[o0]r\b',
+    r'\bd[i!1]e\b',
+    r'\bk[i!1]ll\b',
+    r'\bmurder\b',
+    r'\bass[a@]ult\b',
+    r'\bdrugs?\b',
+    r'\bp[o0]rn\b',
+    r'\bh[a@]te\b',
+    r'\br[a@]c[i!1]st\b',
+    r'\b[i!1]llegal\b',
+    r'\bwe[a@]pon\b',
 ]
 
 TG_API_BASE = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/' if TELEGRAM_TOKEN else None
+
+
+def check_rate_limit(user_id: int, limit_key: str, max_count: int, window: int) -> bool:
+    """
+    Проверка rate limit для пользователя.
+    Возвращает True если запрос разрешён, False если превышен лимит.
+    """
+    key = f"rate_limit:{limit_key}:{user_id}"
+    try:
+        count = r.incr(key)
+        if count == 1:
+            r.expire(key, window)
+        return count <= max_count
+    except Exception:
+        logger.exception('Rate limit check failed')
+        return True  # При ошибке разрешаем (fail-open)
 
 
 def schedule_delayed_task(task_obj: dict, delay_seconds: int):
@@ -150,15 +182,20 @@ def move_due_delayed_tasks():
         logger.exception('Delayed-task mover fatal error')
 
 
-def moderate_prompt(prompt: str) -> bool:
-    """Return True if prompt is allowed, False if blocked."""
+def moderate_prompt(prompt: str) -> tuple:
+    """
+    Улучшенная модерация промпта с использованием регулярных выражений.
+    Возвращает (разрешено: bool, причина: str).
+    """
     if not prompt:
-        return True
+        return True, ""
+    
     low = prompt.lower()
-    for w in BLACKLIST:
-        if w in low:
-            return False
-    return True
+    for pattern in PATTERN_BLACKLIST:
+        if re.search(pattern, low):
+            return False, f"Заблокировано по паттерну модерации"
+    
+    return True, ""
 
 
 def send_telegram_document(chat_id: int, file_bytes: bytes, filename: str = 'solution.pdf') -> bool:
@@ -496,18 +533,61 @@ def process_task(item: dict):
 
     logger.info('Processing task %s for chat %s', task_id, chat_id)
 
+    # Проверка владельца задачи (security check)
+    try:
+        stored_assignee = r.get(f"task_assignee:{task_id}")
+        if stored_assignee:
+            expected_chat_id = stored_assignee.decode('utf-8') if isinstance(stored_assignee, bytes) else str(stored_assignee)
+            if str(chat_id) != expected_chat_id:
+                logger.warning('Security: chat_id mismatch for task %s: expected %s, got %s', task_id, expected_chat_id, chat_id)
+                return  # Игнорируем подозрительную задачу
+    except Exception:
+        logger.exception('Failed to verify task assignee for task %s', task_id)
+        return
+
+    # Rate limiting check
+    if chat_id:
+        try:
+            user_id = int(chat_id)
+            if not check_rate_limit(user_id, "hf_hour", RATE_LIMIT_HF_PER_USER_HOUR, 3600):
+                logger.warning('Rate limit exceeded (hour) for user %s', user_id)
+                if TG_API_BASE:
+                    try:
+                        requests.post(TG_API_BASE + 'sendMessage', 
+                                    data={'chat_id': str(chat_id), 
+                                          'text': f'⚠️ Превышен лимит запросов к HF ({RATE_LIMIT_HF_PER_USER_HOUR}/час). Попробуйте позже.'},
+                                    timeout=10)
+                    except Exception:
+                        pass
+                return
+            
+            if not check_rate_limit(user_id, "hf_day", RATE_LIMIT_HF_PER_USER_DAY, 86400):
+                logger.warning('Rate limit exceeded (day) for user %s', user_id)
+                if TG_API_BASE:
+                    try:
+                        requests.post(TG_API_BASE + 'sendMessage',
+                                    data={'chat_id': str(chat_id),
+                                          'text': f'⚠️ Превышен дневной лимит запросов к HF ({RATE_LIMIT_HF_PER_USER_DAY}/день).'},
+                                    timeout=10)
+                    except Exception:
+                        pass
+                return
+        except (ValueError, TypeError):
+            pass  # chat_id не является числом - пропускаем rate limit
+
     # Validate
     if len(images) > MAX_IMAGES:
         images = images[:MAX_IMAGES]
     if len(user_prompt) > MAX_PROMPT_LEN:
         user_prompt = user_prompt[:MAX_PROMPT_LEN]
 
-    allowed = moderate_prompt(user_prompt)
+    allowed, reason = moderate_prompt(user_prompt)
     if not allowed:
         # notify user and drop prompt
+        logger.warning('Prompt moderation failed for task %s: %s', task_id, reason)
         try:
             if TG_API_BASE and chat_id:
-                msg = {'chat_id': str(chat_id), 'text': 'Дополнительный промпт отклонён политикой; задача отправлена без него.'}
+                msg = {'chat_id': str(chat_id), 'text': f'⚠️ Дополнительный промпт отклонён модерацией. Задача отправлена без него.'}
                 requests.post(TG_API_BASE + 'sendMessage', data=msg, timeout=10)
         except Exception:
             logger.exception('Failed to send moderation notice')

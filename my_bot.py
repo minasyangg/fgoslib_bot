@@ -17,14 +17,8 @@ import io
 import time
 import requests
 import markdown as md
-from jinja2 import Template
-import urllib.parse
-import tempfile
 import base64
 
-# Global browser instance + lock for reuse
-BROWSER = None
-BROWSER_LOCK = None
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 import asyncio
@@ -41,10 +35,12 @@ load_dotenv()
 # ----------------------------
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 UPSTASH_REDIS_URL = os.environ["UPSTASH_REDIS_URL"]
-HF_API_URL = "https://hf.space/embed/mingg93/fgoslib-qwen3/api/predict/"
-HF_TOKEN = os.environ["HF_TOKEN"]
 MONITOR_BASE_URL = os.environ.get("MONITOR_BASE_URL", "")
 REDIS_TTL = int(os.environ.get("REDIS_TTL", "600"))
+
+# Rate limiting settings
+RATE_LIMIT_TASKS_PER_HOUR = int(os.environ.get("RATE_LIMIT_TASKS_PER_HOUR", "10"))
+RATE_LIMIT_TASKS_PER_DAY = int(os.environ.get("RATE_LIMIT_TASKS_PER_DAY", "50"))
 
 # ----------------------------
 # Логи
@@ -56,6 +52,24 @@ logger = logging.getLogger(__name__)
 # Подключение к Redis
 # ----------------------------
 r = redis.Redis.from_url(UPSTASH_REDIS_URL, decode_responses=True)
+
+# ----------------------------
+# Rate limiting функция
+# ----------------------------
+def check_rate_limit(user_id: int, limit_key: str, max_count: int, window: int) -> bool:
+    """
+    Проверка rate limit для пользователя.
+    Возвращает True если запрос разрешён, False если превышен лимит.
+    """
+    key = f"rate_limit:{limit_key}:{user_id}"
+    try:
+        count = r.incr(key)
+        if count == 1:
+            r.expire(key, window)
+        return count <= max_count
+    except Exception:
+        logger.exception('Rate limit check failed')
+        return True  # При ошибке разрешаем (fail-open)
 
 # ----------------------------
 # Функции работы с сессией
@@ -81,46 +95,31 @@ def load_session(user_id):
         return json.loads(raw)
     return None
 
-def update_prompt(user_id, prompt):
-    session = load_session(user_id)
-    if session:
-        session["user_prompt"] = prompt
-        r.set(f"session:{user_id}", json.dumps(session), ex=REDIS_TTL)
-        logger.info(f"Updated prompt for user {user_id}: {prompt}")
-
-def update_format(user_id, output_format):
-    session = load_session(user_id)
-    if session:
-        session["output_format"] = output_format
-        r.set(f"session:{user_id}", json.dumps(session), ex=REDIS_TTL)
-        logger.info(f"Updated output format for user {user_id}: {output_format}")
-
-# ----------------------------
-# Вызов HF API
-# ----------------------------
-def call_hf_api(task_text, images=None, user_prompt="", output_format="md"):
-    payload = {
-        "task_text": task_text,
-        "user_prompt": user_prompt,
-        "images": images or [],
-        "output_format": output_format
-    }
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    logger.info(f"Calling HF API with payload: {payload}")
-    resp = requests.post(HF_API_URL, json=payload, headers=headers)
-    resp.raise_for_status()
-    return resp.json()
-
-
-# Note: PDF/PNG rendering is performed by the external render service.
-# The bot no longer performs headless rendering locally.
-
 # ----------------------------
 # Команды бота
 # ----------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     username = update.message.from_user.username or str(user_id)
+    
+    # Проверка rate limit (только для задач, не для простого /start без аргументов)
+    if context.args:
+        # Проверка часового лимита
+        if not check_rate_limit(user_id, "tasks_hour", RATE_LIMIT_TASKS_PER_HOUR, 3600):
+            await update.message.reply_text(
+                f"⚠️ Вы превысили лимит запросов ({RATE_LIMIT_TASKS_PER_HOUR} задач в час). Попробуйте позже."
+            )
+            log_event(username, "/start", "rate_limited_hour")
+            return
+        
+        # Проверка дневного лимита
+        if not check_rate_limit(user_id, "tasks_day", RATE_LIMIT_TASKS_PER_DAY, 86400):
+            await update.message.reply_text(
+                f"⚠️ Вы превысили дневной лимит запросов ({RATE_LIMIT_TASKS_PER_DAY} задач в день). Попробуйте завтра."
+            )
+            log_event(username, "/start", "rate_limited_day")
+            return
+    
     # Если приходит аргумент (taskId) — пробуем загрузить задачу из Redis
     if context.args:
         task_id = context.args[0]
@@ -299,6 +298,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     username = update.message.from_user.username or str(user_id)
+    
+    # Проверка rate limit
+    if not check_rate_limit(user_id, "tasks_hour", RATE_LIMIT_TASKS_PER_HOUR, 3600):
+        await update.message.reply_text(
+            f"⚠️ Вы превысили лимит запросов ({RATE_LIMIT_TASKS_PER_HOUR} задач в час). Попробуйте позже."
+        )
+        log_event(username, "handle_task", "rate_limited_hour")
+        return
+    
+    if not check_rate_limit(user_id, "tasks_day", RATE_LIMIT_TASKS_PER_DAY, 86400):
+        await update.message.reply_text(
+            f"⚠️ Вы превысили дневной лимит запросов ({RATE_LIMIT_TASKS_PER_DAY} задач в день). Попробуйте завтра."
+        )
+        log_event(username, "handle_task", "rate_limited_day")
+        return
+    
     task_text = update.message.text or ""
     if not task_text and not update.message.photo:
         await update.message.reply_text("Пожалуйста, отправь текст задания или изображение.")
@@ -334,55 +349,6 @@ async def handle_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response = f"Локальная задача сохранена под id {local_task_id}. Добавь /prompt если хочешь дать дополнительный промт."
     await update.message.reply_text(response)
     log_event(username, task_text or "[photo]", response)
-
-async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    username = update.message.from_user.username or str(user_id)
-    prompt = " ".join(context.args)
-    if not prompt:
-        response = "Используй /prompt <твой текст>"
-        await update.message.reply_text(response)
-        log_event(username, f"/prompt", response)
-        return
-
-    update_prompt(user_id, prompt)
-    response = "Промт сохранён! Получаем решение..."
-    await update.message.reply_text(response)
-    log_event(username, f"/prompt {prompt}", response)
-
-    session = load_session(user_id)
-    if not session:
-        response = "Сессия истекла или отсутствует."
-        await update.message.reply_text(response)
-        log_event(username, f"/prompt {prompt}", response)
-        return
-
-    try:
-        result = call_hf_api(
-            task_text=session["task_text"],
-            images=session["images"],
-            user_prompt=session.get("user_prompt", ""),
-            output_format=session.get("output_format", "md")
-        )
-        # Обработка PDF
-        if session.get("output_format") == "pdf" and "pdf" in result:
-            pdf_url = result["pdf"]  # если HF возвращает ссылку
-            pdf_bytes = requests.get(pdf_url).content
-            await update.message.reply_document(document=InputFile(io.BytesIO(pdf_bytes), filename="solution.pdf"))
-            log_event(username, f"/prompt {prompt}", "[PDF sent]")
-        elif "text" in result:
-            await update.message.reply_text(result["text"])
-            log_event(username, f"/prompt {prompt}", result["text"])
-        else:
-            response = "Не удалось получить решение."
-            await update.message.reply_text(response)
-            log_event(username, f"/prompt {prompt}", response)
-    except Exception as e:
-        logger.exception("Ошибка при обращении к HF API")
-        response = f"Ошибка при генерации решения: {e}"
-        await update.message.reply_text(response)
-        log_event(username, f"/prompt {prompt}", response)
-
 
 
 async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -484,7 +450,6 @@ def start_flask():
 def run_bot():
     bot_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start))
-    bot_app.add_handler(CommandHandler("prompt", handle_prompt))
     bot_app.add_handler(CallbackQueryHandler(callback_query_handler))
     bot_app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_task))
     logger.info("Бот запущен...")

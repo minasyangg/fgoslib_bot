@@ -48,6 +48,31 @@ REDIS_TTL = int(os.environ.get('REDIS_TTL', '600'))
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 
+# File size limit (10MB default)
+MAX_FILE_SIZE_MB = int(os.environ.get('MAX_FILE_SIZE_MB', '10'))
+MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
+
+# Rate limiting settings
+RATE_LIMIT_RENDER_PER_USER_HOUR = int(os.environ.get('RATE_LIMIT_RENDER_PER_USER_HOUR', '10'))
+RATE_LIMIT_RENDER_PER_USER_DAY = int(os.environ.get('RATE_LIMIT_RENDER_PER_USER_DAY', '30'))
+
+
+def check_rate_limit(user_id: int, limit_key: str, max_count: int, window: int) -> bool:
+    """
+    Проверка rate limit для пользователя.
+    Возвращает True если запрос разрешён, False если превышен лимит.
+    """
+    key = f"rate_limit:{limit_key}:{user_id}"
+    try:
+        count = r.incr(key)
+        if count == 1:
+            r.expire(key, window)
+        return count <= max_count
+    except Exception:
+        logger.exception('Rate limit check failed')
+        return True  # При ошибке разрешаем (fail-open)
+
+
 # Optional S3 config
 S3_BUCKET = os.environ.get('S3_BUCKET')
 S3_ENDPOINT = os.environ.get('S3_ENDPOINT')  # e.g. https://s3.amazonaws.com or DO Spaces endpoint
@@ -135,6 +160,33 @@ async def render_task(task_id: str):
         logger.exception('Failed to parse task JSON')
         return
 
+    # Проверка владельца задачи (security check)
+    try:
+        stored_assignee = r.get(f"task_assignee:{task_id}")
+        if stored_assignee:
+            assignee_chat_id = stored_assignee.decode('utf-8') if isinstance(stored_assignee, bytes) else str(stored_assignee)
+            
+            # Rate limiting check для пользователя
+            try:
+                user_id = int(assignee_chat_id)
+                if not check_rate_limit(user_id, "render_hour", RATE_LIMIT_RENDER_PER_USER_HOUR, 3600):
+                    logger.warning('Rate limit exceeded (hour) for render user %s', user_id)
+                    r.set(f"task_error:{task_id}", 
+                          f"⚠️ Превышен лимит рендеринга ({RATE_LIMIT_RENDER_PER_USER_HOUR}/час). Попробуйте позже.",
+                          ex=REDIS_TTL)
+                    return
+                
+                if not check_rate_limit(user_id, "render_day", RATE_LIMIT_RENDER_PER_USER_DAY, 86400):
+                    logger.warning('Rate limit exceeded (day) for render user %s', user_id)
+                    r.set(f"task_error:{task_id}",
+                          f"⚠️ Превышен дневной лимит рендеринга ({RATE_LIMIT_RENDER_PER_USER_DAY}/день).",
+                          ex=REDIS_TTL)
+                    return
+            except (ValueError, TypeError):
+                pass  # assignee_chat_id не является числом - пропускаем rate limit
+    except Exception:
+        logger.exception('Failed to verify task assignee or rate limit for task %s', task_id)
+
     html = build_html(task_obj)
 
     async with async_playwright() as p:
@@ -161,6 +213,43 @@ async def render_task(task_id: str):
 
             logger.info('Rendering task %s as PDF (forced)', task_id)
             pdf_bytes = await page.pdf(format='A4', print_background=True)
+            
+            # Проверка размера файла
+            file_size = len(pdf_bytes)
+            logger.info('Generated PDF size for task %s: %d bytes (%.2f MB)', task_id, file_size, file_size / 1024 / 1024)
+            
+            if file_size > MAX_FILE_SIZE:
+                logger.warning('PDF too large for task %s: %d bytes (max %d)', task_id, file_size, MAX_FILE_SIZE)
+                
+                if not S3_BUCKET:
+                    # Нет S3 - сохраняем ошибку и уведомляем пользователя
+                    error_msg = f"⚠️ Файл слишком большой ({file_size//1024//1024}MB, максимум {MAX_FILE_SIZE_MB}MB). S3 не настроен."
+                    r.set(f"task_error:{task_id}", error_msg, ex=REDIS_TTL)
+                    
+                    # Попытка уведомить пользователя
+                    try:
+                        assignee = r.get(f"task_assignee:{task_id}")
+                        if assignee and TELEGRAM_TOKEN:
+                            chat_id = assignee.decode('utf-8') if isinstance(assignee, bytes) else str(assignee)
+                            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+                            requests.post(url, data={'chat_id': chat_id, 'text': error_msg}, timeout=10)
+                    except Exception:
+                        logger.exception('Failed to notify user about file size error')
+                    return
+                
+                # Есть S3 - сохраняем только туда (не в Redis)
+                logger.info('File too large, saving to S3 only for task %s', task_id)
+                key = f"renders/{task_id}.pdf"
+                url = upload_to_s3(pdf_bytes, key, 'application/pdf')
+                if url:
+                    r.set(f"task_pdf_url:{task_id}", url, ex=REDIS_TTL)
+                    await notify_user_with_file(task_id, pdf_bytes, is_pdf=True)
+                else:
+                    error_msg = f"⚠️ Не удалось загрузить большой файл в S3"
+                    r.set(f"task_error:{task_id}", error_msg, ex=REDIS_TTL)
+                return
+            
+            # Файл в пределах лимита - сохраняем как обычно
             if S3_BUCKET:
                 key = f"renders/{task_id}.pdf"
                 url = upload_to_s3(pdf_bytes, key, 'application/pdf')
@@ -171,22 +260,6 @@ async def render_task(task_id: str):
             else:
                 r.set(f"task_pdf:{task_id}", base64.b64encode(pdf_bytes).decode('ascii'), ex=REDIS_TTL)
             await notify_user_with_file(task_id, pdf_bytes, is_pdf=True)
-
-            # --- PNG generation code (kept for future use) ---
-            # scroll_height = await page.evaluate('() => document.body.scrollHeight')
-            # logger.info('Task %s scrollHeight=%s', task_id, scroll_height)
-            # if scroll_height <= 1400:
-            #     png_bytes = await page.screenshot(full_page=True, type='png')
-            #     if S3_BUCKET:
-            #         key = f"renders/{task_id}.png"
-            #         url = upload_to_s3(png_bytes, key, 'image/png')
-            #         if url:
-            #             r.set(f"task_png_url:{task_id}", url, ex=REDIS_TTL)
-            #         else:
-            #             r.set(f"task_png:{task_id}", base64.b64encode(png_bytes).decode('ascii'), ex=REDIS_TTL)
-            #     else:
-            #         r.set(f"task_png:{task_id}", base64.b64encode(png_bytes).decode('ascii'), ex=REDIS_TTL)
-            #     await notify_user_with_file(task_id, png_bytes, is_pdf=False)
 
         except Exception:
             logger.exception('Render failed for %s', task_id)
