@@ -1,3 +1,4 @@
 .env
 .vscode/
 fgoslib-qwen3
+.env.example
