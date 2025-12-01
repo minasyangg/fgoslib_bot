@@ -100,7 +100,7 @@ RATE_LIMIT_HF_PER_USER_DAY = int(os.environ.get('RATE_LIMIT_HF_PER_USER_DAY', '2
 
 # Gradio/Space settings
 HF_SPACE = os.environ.get('HF_SPACE', 'mingg93/fgoslib-qwen3')
-HF_API_NAME = os.environ.get('HF_API_NAME', '/lambda')  # Gradio auto-generates /lambda for wrapped functions
+HF_API_NAME = os.environ.get('HF_API_NAME', '/solve_problem')
 # Enforce using gradio_client with a provided HF_TOKEN only. No HTTP fallback allowed.
 USE_GRADIO_CLIENT = True
 HF_ALLOW_HTTP_FALLBACK = False
@@ -455,8 +455,8 @@ def call_hf_via_gradio_client(task_text: str, images: list, user_prompt: str):
             logger.debug('gradio predict args: (failed to build preview)')
 
         res = client.predict(
-            text=task_text,
-            img=image_input,
+            text_input=task_text,
+            image_input=image_input,
             api_name=HF_API_NAME
         )
         # res expected [markdown_str, filepath_or_obj, time_str]
