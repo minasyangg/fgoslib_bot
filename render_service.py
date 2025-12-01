@@ -106,9 +106,12 @@ def build_html(task_obj: dict) -> str:
     """Return an HTML document string with KaTeX included for client-side math rendering."""
     text = task_obj.get('task_text', '') or ''
     try:
-        body = md.markdown(text, extensions=['extra', 'tables'])
+        body = md.markdown(text, extensions=['extra', 'tables', 'fenced_code', 'codehilite', 'md_in_html'])
     except Exception:
-        body = f"<pre>{text}</pre>"
+        try:
+            body = md.markdown(text, extensions=['extra', 'tables'])
+        except Exception:
+            body = f"<pre>{text}</pre>"
 
     # Build HTML without using an f-string to avoid brace-escaping issues
     port_str = os.environ.get('PORT', os.environ.get('HTTP_PORT', '8080'))
@@ -124,9 +127,112 @@ def build_html(task_obj: dict) -> str:
     head += "\n    <link rel=\"stylesheet\" href=\"" + base_url + "/static/katex/katex.min.css\">"
     head += "\n    <script defer src=\"" + base_url + "/static/katex/katex.min.js\"></script>"
     head += "\n    <script defer src=\"" + base_url + "/static/katex/contrib/auto-render.min.js\"></script>"
-    head += "\n    <style>body{font-family: DejaVu Sans, Arial, sans-serif; padding:20px;} img{max-width:100%; height:auto;} pre{white-space:pre-wrap;}</style>\n</head>\n<body>"
+    # Улучшенные стили для математики, таблиц и схем
+    head += '''
+    <style>
+        body {
+            font-family: "Times New Roman", "DejaVu Serif", Georgia, serif;
+            font-size: 14pt;
+            line-height: 1.6;
+            padding: 25px 40px;
+            max-width: 800px;
+            margin: 0 auto;
+            color: #1a1a1a;
+        }
+        /* Математические формулы */
+        .katex { font-size: 1.1em; }
+        .katex-display { 
+            margin: 1em 0;
+            padding: 0.5em;
+            overflow-x: auto;
+        }
+        /* Таблицы */
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 1em 0;
+            page-break-inside: avoid;
+        }
+        th, td {
+            border: 1px solid #333;
+            padding: 8px 12px;
+            text-align: left;
+        }
+        th {
+            background-color: #f0f0f0;
+            font-weight: bold;
+        }
+        tr:nth-child(even) { background-color: #fafafa; }
+        /* Код и pre */
+        pre, code {
+            font-family: "Consolas", "Monaco", "Courier New", monospace;
+            background-color: #f5f5f5;
+            border-radius: 4px;
+        }
+        pre {
+            padding: 12px;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            border: 1px solid #ddd;
+        }
+        code { padding: 2px 5px; font-size: 0.9em; }
+        pre code { padding: 0; background: none; }
+        /* Заголовки */
+        h1, h2, h3, h4 {
+            margin-top: 1.5em;
+            margin-bottom: 0.5em;
+            color: #333;
+            page-break-after: avoid;
+        }
+        h1 { font-size: 1.8em; border-bottom: 2px solid #333; padding-bottom: 0.3em; }
+        h2 { font-size: 1.5em; border-bottom: 1px solid #666; padding-bottom: 0.2em; }
+        h3 { font-size: 1.2em; }
+        /* Списки */
+        ul, ol { margin: 0.5em 0; padding-left: 2em; }
+        li { margin: 0.3em 0; }
+        /* Изображения и схемы */
+        img {
+            max-width: 100%;
+            height: auto;
+            display: block;
+            margin: 1em auto;
+            page-break-inside: avoid;
+        }
+        figure {
+            margin: 1em 0;
+            text-align: center;
+            page-break-inside: avoid;
+        }
+        figcaption {
+            font-style: italic;
+            color: #666;
+            margin-top: 0.5em;
+        }
+        /* Блоки с решением */
+        blockquote {
+            border-left: 4px solid #2196F3;
+            margin: 1em 0;
+            padding: 0.5em 1em;
+            background-color: #f8f9fa;
+        }
+        /* Горизонтальные линии */
+        hr {
+            border: none;
+            border-top: 1px solid #ccc;
+            margin: 1.5em 0;
+        }
+        /* Печать */
+        @media print {
+            body { padding: 0; }
+            .katex-display { page-break-inside: avoid; }
+        }
+    </style>
+'''  
+    head += "\n</head>\n<body>"
 
     # JS snippet: use normal JS braces (no doubling) since we are not in an f-string
+    # Улучшенный JS для рендеринга KaTeX с дополнительными опциями
     js = ("""
 <script>
 document.addEventListener('DOMContentLoaded', ()=>{
@@ -137,10 +243,32 @@ document.addEventListener('DOMContentLoaded', ()=>{
                     {left: '$$', right: '$$', display: true},
                     {left: '$', right: '$', display: false},
                     {left: '\\(', right: '\\)', display: false},
-                    {left: '\\[', right: '\\]', display: true}
-                ]
+                    {left: '\\[', right: '\\]', display: true},
+                    {left: '\\begin{equation}', right: '\\end{equation}', display: true},
+                    {left: '\\begin{align}', right: '\\end{align}', display: true},
+                    {left: '\\begin{aligned}', right: '\\end{aligned}', display: true},
+                    {left: '\\begin{gather}', right: '\\end{gather}', display: true},
+                    {left: '\\begin{cases}', right: '\\end{cases}', display: true},
+                    {left: '\\begin{matrix}', right: '\\end{matrix}', display: true},
+                    {left: '\\begin{pmatrix}', right: '\\end{pmatrix}', display: true},
+                    {left: '\\begin{bmatrix}', right: '\\end{bmatrix}', display: true}
+                ],
+                throwOnError: false,
+                errorColor: '#cc0000',
+                strict: false,
+                trust: true,
+                macros: {
+                    '\\N': '\\mathbb{N}',
+                    '\\Z': '\\mathbb{Z}',
+                    '\\Q': '\\mathbb{Q}',
+                    '\\R': '\\mathbb{R}',
+                    '\\C': '\\mathbb{C}',
+                    '\\vec': '\\mathbf',
+                    '\\abs': '|#1|',
+                    '\\norm': '\\|#1\\|'
+                }
             });
-        } catch(e) { console.error(e); }
+        } catch(e) { console.error('KaTeX error:', e); }
     }
 });
 </script>
@@ -309,6 +437,16 @@ async def notify_user_with_file(task_id: str, file_bytes: bytes, is_pdf: bool):
                     logger.warning('Telegram send failed: %s %s', resp.status_code, resp.text)
                 else:
                     logger.info('Sent rendered file to user %s for task %s', chat_id, task_id)
+                    # Отправить сообщение "Задача решена" со стрелкой вверх
+                    try:
+                        msg_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+                        requests.post(msg_url, data={
+                            'chat_id': chat_id,
+                            'text': '✅ Задача решена! 👆👁',
+                            'parse_mode': 'HTML'
+                        }, timeout=10)
+                    except Exception:
+                        logger.exception('Failed to send completion message')
             else:
                 logger.info('TELEGRAM_TOKEN not set; skipping send to user %s for task %s', assignee, task_id)
         else:

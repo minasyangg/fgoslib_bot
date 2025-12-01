@@ -211,6 +211,15 @@ def send_telegram_document(chat_id: int, file_bytes: bytes, filename: str = 'sol
         resp = requests.post(TG_API_BASE + 'sendDocument', data=data, files=files, timeout=30)
         if resp.status_code // 100 == 2:
             logger.info('Sent PDF to chat %s', chat_id)
+            # Отправить сообщение "Задача решена" со стрелкой вверх
+            try:
+                requests.post(TG_API_BASE + 'sendMessage', data={
+                    'chat_id': str(chat_id),
+                    'text': '✅ Задача решена! 👆👁',
+                    'parse_mode': 'HTML'
+                }, timeout=10)
+            except Exception:
+                logger.exception('Failed to send completion message')
             return True
         else:
             logger.warning('Telegram send failed: %s %s', resp.status_code, resp.text)
