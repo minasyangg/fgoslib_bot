@@ -366,7 +366,6 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         user_active_key = f"user_active_hf:{chat_id}"
         active_task_id = r.get(user_active_key)
         if active_task_id:
-            active_task_id = active_task_id.decode('utf-8') if isinstance(active_task_id, bytes) else str(active_task_id)
             await context.bot.send_message(
                 chat_id=chat_id,
                 text='⏳ У вас уже есть задача в обработке. Дождитесь получения решения текущего задания, прежде чем отправлять новое.'
@@ -374,13 +373,21 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
             log_event(username, f"solve {task_id}", f"blocked_active_task:{active_task_id}")
             return
         
+        # СРАЗУ устанавливаем флаг активной задачи, чтобы заблокировать параллельные запросы
+        r.set(user_active_key, task_id, ex=REDIS_TTL)
+        logger.info('Set active task flag for user %s: %s', chat_id, task_id)
+        
         raw = r.get(f"task:{task_id}") or r.get(task_id)
         if not raw:
+            # Задача не найдена — снимаем флаг
+            r.delete(user_active_key)
             await query.edit_message_text('Задача не найдена.')
             return
         try:
             task_obj = json.loads(raw)
         except Exception:
+            # Неверные данные — снимаем флаг
+            r.delete(user_active_key)
             await query.edit_message_text('Неверные данные задачи.')
             return
 
