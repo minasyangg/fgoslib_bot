@@ -85,6 +85,8 @@ if not TELEGRAM_TOKEN:
     logger.warning('TELEGRAM_TOKEN not set; cannot send Telegram messages')
 
 r = redis.Redis.from_url(UPSTASH_REDIS_URL, decode_responses=False)
+# Отдельный клиент для строковых операций (совместимость с my_bot.py где decode_responses=True)
+r_str = redis.Redis.from_url(UPSTASH_REDIS_URL, decode_responses=True)
 
 MAX_IMAGES = int(os.environ.get('MAX_IMAGES', '5'))
 MAX_PROMPT_LEN = int(os.environ.get('MAX_PROMPT_LEN', '1000'))
@@ -541,8 +543,9 @@ def clear_user_active_task(chat_id):
     if not chat_id:
         return
     try:
+        # Используем r_str (decode_responses=True) для совместимости с my_bot.py
         key = f"user_active_hf:{chat_id}"
-        r.delete(key)
+        r_str.delete(key)
         logger.info('Cleared active task flag for user %s', chat_id)
     except Exception:
         logger.exception('Failed to clear user active task flag')

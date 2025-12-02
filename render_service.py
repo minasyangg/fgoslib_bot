@@ -44,6 +44,8 @@ if not UPSTASH_REDIS_URL:
     raise RuntimeError('UPSTASH_REDIS_URL is required')
 
 r = redis.Redis.from_url(UPSTASH_REDIS_URL, decode_responses=False)
+# Отдельный клиент для строковых операций (совместимость с my_bot.py где decode_responses=True)
+r_str = redis.Redis.from_url(UPSTASH_REDIS_URL, decode_responses=True)
 REDIS_TTL = int(os.environ.get('REDIS_TTL', '600'))
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
@@ -290,7 +292,8 @@ async def notify_user_with_file(task_id: str, file_bytes: bytes, is_pdf: bool):
             # Если это решение — очистить флаг активной задачи пользователя
             if is_solution:
                 try:
-                    r.delete(f"user_active_hf:{chat_id}")
+                    # Используем r_str (decode_responses=True) для совместимости с my_bot.py
+                    r_str.delete(f"user_active_hf:{chat_id}")
                     logger.info('Cleared active task flag for user %s (via render_service)', chat_id)
                 except Exception:
                     logger.exception('Failed to clear user active task flag')
