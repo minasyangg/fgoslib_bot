@@ -298,7 +298,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log_event(username, f"/start {task_id}", response)
             return
         else:
-            response = f"Задача {task_id} не найдена. Проверьте taskId на стороне сайта."
+            response = f"Задача {task_id} не найдена. Проверьте taskId на сайте fgoslib.ru"
             await update.message.reply_text(response)
             log_event(username, f"/start {task_id}", response)
             return
@@ -401,7 +401,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
                      f'Возможные причины:\n'
                      f'• Срок хранения данных истёк\n'
                      f'• Задача была удалена\n\n'
-                     f'Пожалуйста, создайте задачу заново на сайте.'
+                     f'Пожалуйста, создайте задачу заново на сайте fgoslib.ru'
             )
             log_event(username, f"solve {task_id}", "task_not_found")
             return
@@ -413,7 +413,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=f'❌ Ошибка чтения данных задачи {task_id}.\n'
-                     f'Пожалуйста, создайте задачу заново на сайте.'
+                     f'Пожалуйста, создайте задачу заново на сайте fgoslib.ru'
             )
             log_event(username, f"solve {task_id}", "invalid_task_data")
             return
