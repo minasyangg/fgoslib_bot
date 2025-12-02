@@ -130,28 +130,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pdf_b64_check = r.get(f"task_pdf:{task_id}")
             
             if pdf_url_check or pdf_b64_check:
-                # Задание уже сгенерировано — отправляем его без повторной генерации
-                kb = InlineKeyboardMarkup([[InlineKeyboardButton("Решить", callback_data=f"solve:{task_id}"), InlineKeyboardButton("Удалить", callback_data=f"del:{task_id}")]])
-                try:
-                    if pdf_url_check:
-                        if isinstance(pdf_url_check, bytes):
-                            pdf_url_check = pdf_url_check.decode('utf-8')
-                        resp = requests.get(pdf_url_check, timeout=30)
-                        resp.raise_for_status()
-                        content = resp.content
-                        await update.message.reply_document(document=InputFile(io.BytesIO(content), filename=f"task_{task_id}.pdf"), reply_markup=kb)
-                    elif pdf_b64_check:
-                        if isinstance(pdf_b64_check, bytes):
-                            pdf_b64_check = pdf_b64_check.decode('ascii')
-                        data = base64.b64decode(pdf_b64_check)
-                        await update.message.reply_document(document=InputFile(io.BytesIO(data), filename=f"task_{task_id}.pdf"), reply_markup=kb)
-                    
-                    await update.message.reply_text(f"📄 Задание с ID {task_id} уже было сгенерировано и отправлено вам в чат.")
-                    log_event(username, f"/start {task_id}", "already_generated")
-                    return
-                except Exception:
-                    logger.exception('Ошибка при отправке уже сгенерированного PDF')
-                    # Продолжаем стандартную процедуру если не удалось отправить
+                # Задание уже сгенерировано — НЕ отправляем файл повторно, только уведомляем
+                # (Telegram не поддерживает скроллинг к сообщению в личных чатах)
+                await update.message.reply_text(
+                    f"📄 Задание с ID {task_id} уже было сгенерировано и отправлено вам в чат ранее.\n"
+                    f"Прокрутите чат вверх, чтобы найти его."
+                )
+                log_event(username, f"/start {task_id}", "already_generated")
+                return
         except Exception:
             logger.exception('Ошибка проверки готовности PDF')
         
@@ -407,16 +393,29 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         
         raw = r.get(f"task:{task_id}") or r.get(task_id)
         if not raw:
-            # Задача не найдена — снимаем флаг
+            # Задача не найдена в Redis — снимаем флаг и уведомляем пользователя
             r.delete(user_active_key)
-            await query.edit_message_text('Задача не найдена.')
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f'❌ Данные задачи {task_id} не найдены.\n\n'
+                     f'Возможные причины:\n'
+                     f'• Срок хранения данных истёк\n'
+                     f'• Задача была удалена\n\n'
+                     f'Пожалуйста, создайте задачу заново на сайте.'
+            )
+            log_event(username, f"solve {task_id}", "task_not_found")
             return
         try:
             task_obj = json.loads(raw)
         except Exception:
-            # Неверные данные — снимаем флаг
+            # Неверные данные — снимаем флаг и уведомляем
             r.delete(user_active_key)
-            await query.edit_message_text('Неверные данные задачи.')
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f'❌ Ошибка чтения данных задачи {task_id}.\n'
+                     f'Пожалуйста, создайте задачу заново на сайте.'
+            )
+            log_event(username, f"solve {task_id}", "invalid_task_data")
             return
 
         # Попытка обновить текст сообщения: если это был текстовый message — редактируем текст,
