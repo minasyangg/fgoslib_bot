@@ -536,6 +536,18 @@ def save_result_to_redis(task_id: str, result: dict):
         logger.exception('Failed to save result to redis')
 
 
+def clear_user_active_task(chat_id):
+    """Очистить флаг активной задачи пользователя после завершения."""
+    if not chat_id:
+        return
+    try:
+        key = f"user_active_hf:{chat_id}"
+        r.delete(key)
+        logger.info('Cleared active task flag for user %s', chat_id)
+    except Exception:
+        logger.exception('Failed to clear user active task flag')
+
+
 # --- Периодические уведомления о статусе задачи ---
 NOTIFICATION_INTERVAL = int(os.environ.get('NOTIFICATION_INTERVAL', '10'))  # секунд
 GPU_DURATION_LIMIT = int(os.environ.get('GPU_DURATION_LIMIT', '90'))  # секунд
@@ -741,6 +753,7 @@ def process_task(item: dict):
                     if retry_count > HF_MAX_RETRIES:
                         logger.warning('Max retries exceeded for task %s; giving up', task_id)
                         save_result_to_redis(task_id, {'status': 'quota_exhausted', 'error': str(qe)})
+                        clear_user_active_task(chat_id)
                         if TG_API_BASE and chat_id:
                             try:
                                 requests.post(TG_API_BASE + 'sendMessage', data={'chat_id': str(chat_id), 'text': 'Генерация временно недоступна (квота исчерпана). Попробуйте позже.'}, timeout=10)
@@ -769,6 +782,7 @@ def process_task(item: dict):
                     # like an API endpoint.
                     logger.exception('gradio_client call failed')
                     save_result_to_redis(task_id, {'status': 'error', 'error': 'gradio_client_failed'})
+                    clear_user_active_task(chat_id)
                     if notifier:
                         notifier.stop()
                     if not HF_ALLOW_HTTP_FALLBACK:
@@ -782,6 +796,7 @@ def process_task(item: dict):
                     if not HF_API_URL or '/api/' not in HF_API_URL:
                         logger.warning('HF_API_URL not configured as API endpoint; skipping HTTP fallback')
                         save_result_to_redis(task_id, {'status': 'error', 'error': 'no_http_fallback_available'})
+                        clear_user_active_task(chat_id)
                         if TG_API_BASE and chat_id:
                             try:
                                 requests.post(TG_API_BASE + 'sendMessage', data={'chat_id': str(chat_id), 'text': 'Интеграция с HF настроена некорректно (нет HTTP fallback).'}, timeout=10)
@@ -794,6 +809,7 @@ def process_task(item: dict):
                 # Do not attempt any HTTP fallback; surface the error instead
                 logger.error('No response from gradio_client for task %s and HTTP fallback disabled', task_id)
                 save_result_to_redis(task_id, {'status': 'error', 'error': 'no_gradio_response'})
+                clear_user_active_task(chat_id)
                 if TG_API_BASE and chat_id:
                     try:
                         requests.post(TG_API_BASE + 'sendMessage', data={'chat_id': str(chat_id), 'text': 'Ошибка интеграции с сервисом генерации (нет ответа от API). Попробуйте позже.'}, timeout=10)
@@ -838,6 +854,7 @@ def process_task(item: dict):
                     # fallback: no recognizable pdf
                     if not pdf_bytes:
                         save_result_to_redis(task_id, {'status': 'error', 'error': 'no_pdf_in_hf_response', 'response': resp})
+                        clear_user_active_task(chat_id)
                         if TG_API_BASE and chat_id:
                             try:
                                 requests.post(TG_API_BASE + 'sendMessage', data={'chat_id': str(chat_id), 'text': 'HF вернул неожиданный формат ответа.'}, timeout=10)
@@ -886,12 +903,14 @@ def process_task(item: dict):
                     ok = send_telegram_document(chat_id, pdf_bytes, filename=f'solution_{task_id}.pdf', task_id=task_id)
                 # save to redis (store as base64 to avoid external storage)
                 save_result_to_redis(task_id, {'status': 'ok', 'pdf_base64': base64.b64encode(pdf_bytes).decode('ascii')})
+                clear_user_active_task(chat_id)
                 return
             else:
                 if notifier:
                     notifier.stop()  # Удалить промежуточные сообщения
                 # unreachable normally
                 save_result_to_redis(task_id, {'status': 'error', 'error': 'no_pdf_bytes'})
+                clear_user_active_task(chat_id)
                 return
 
         except Exception as e:
@@ -904,6 +923,7 @@ def process_task(item: dict):
     if notifier:
         notifier.stop()
     save_result_to_redis(task_id, {'status': 'error', 'error': last_err})
+    clear_user_active_task(chat_id)
     if TG_API_BASE and chat_id:
         try:
             requests.post(TG_API_BASE + 'sendMessage', data={'chat_id': str(chat_id), 'text': '❌ Ошибка при генерации решения, попробуйте позже.'}, timeout=10)

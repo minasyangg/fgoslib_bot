@@ -360,6 +360,20 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     if data.startswith('solve:'):
         task_id = data.split(':',1)[1]
+        chat_id = query.message.chat_id
+        
+        # Проверка: есть ли у пользователя активная задача в HF
+        user_active_key = f"user_active_hf:{chat_id}"
+        active_task_id = r.get(user_active_key)
+        if active_task_id:
+            active_task_id = active_task_id.decode('utf-8') if isinstance(active_task_id, bytes) else str(active_task_id)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text='⏳ У вас уже есть задача в обработке. Дождитесь получения решения текущего задания, прежде чем отправлять новое.'
+            )
+            log_event(username, f"solve {task_id}", f"blocked_active_task:{active_task_id}")
+            return
+        
         raw = r.get(f"task:{task_id}") or r.get(task_id)
         if not raw:
             await query.edit_message_text('Задача не найдена.')
@@ -406,6 +420,8 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
                 # push to hf_queue (worker uses BRPOP)
                 r.lpush('hf_queue', json.dumps(payload))
                 r.set(pending_key, '1', ex=REDIS_TTL)
+                # Отмечаем пользователя как имеющего активную задачу
+                r.set(user_active_key, task_id, ex=REDIS_TTL)
                 log_event(username, f"enqueue_hf {task_id}", 'enqueued')
             else:
                 log_event(username, f"enqueue_hf {task_id}", 'already_pending')
