@@ -395,7 +395,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         # Попытка обновить текст сообщения: если это был текстовый message — редактируем текст,
         # если это был документ/фото без текста — попробуем отредактировать caption,
         # в противном случае отправим новое сообщение в чат как fallback.
-        msg_text = 'Задача поставлена в очередь на обработку (HF). Как только решение будет готово, я отправлю его в этот чат.'
+        msg_text = 'Задача поставлена в очередь на обработку. Как только решение будет готово, я отправлю его в этот чат.'
         try:
             if query.message and getattr(query.message, 'text', None):
                 await query.edit_message_text(msg_text)

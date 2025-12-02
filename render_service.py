@@ -279,8 +279,9 @@ async def render_task(task_id: str):
             except Exception:
                 pass
 
-async def notify_user_with_file(task_id: str, file_bytes: bytes, is_pdf: bool):
+async def notify_user_with_file(task_id: str, file_bytes: bytes, is_pdf: bool = True):
     # Try to send the generated file to the assignee via Telegram Bot API
+    # Всегда отправляем как PDF (is_pdf параметр оставлен для совместимости)
     # Проверяем — это решение (hf_render:*) или задание
     is_solution = task_id.startswith('hf_render:')
     
@@ -300,12 +301,9 @@ async def notify_user_with_file(task_id: str, file_bytes: bytes, is_pdf: bool):
             
             if TELEGRAM_TOKEN:
                 url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/"
-                if is_pdf:
-                    api = url + 'sendDocument'
-                    files = {'document': (f'task_{task_id}.pdf', file_bytes, 'application/pdf')}
-                else:
-                    api = url + 'sendPhoto'
-                    files = {'photo': (f'task_{task_id}.png', file_bytes, 'image/png')}
+                # Всегда отправляем как PDF
+                api = url + 'sendDocument'
+                files = {'document': (f'task_{task_id}.pdf', file_bytes, 'application/pdf')}
                 data = {'chat_id': chat_id}
                 
                 # Inline кнопки только для заданий, не для решений
@@ -327,12 +325,14 @@ async def notify_user_with_file(task_id: str, file_bytes: bytes, is_pdf: bool):
                     logger.warning('Telegram send failed: %s %s', resp.status_code, resp.text)
                 else:
                     logger.info('Sent rendered file to user %s for task %s', chat_id, task_id)
-                    # Если это решение — отправить сообщение "Задача решена"
+                    # Если это решение — отправить сообщение "Задача решена" с номером задачи
                     if is_solution:
                         try:
+                            # Извлекаем реальный task_id из hf_render:{task_id}
+                            real_task_id = task_id.replace('hf_render:', '')
                             requests.post(url + 'sendMessage', data={
                                 'chat_id': chat_id,
-                                'text': '✅ Задача решена! 👆👁',
+                                'text': f'✅ Задача <b>{real_task_id}</b> решена! 👆👁',
                                 'parse_mode': 'HTML'
                             }, timeout=10)
                         except Exception:
