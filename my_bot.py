@@ -123,6 +123,38 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Если приходит аргумент (taskId) — пробуем загрузить задачу из Redis
     if context.args:
         task_id = context.args[0]
+        
+        try:
+            # СНАЧАЛА проверяем — есть ли уже готовый PDF для этого задания
+            pdf_url_check = r.get(f"task_pdf_url:{task_id}")
+            pdf_b64_check = r.get(f"task_pdf:{task_id}")
+            
+            if pdf_url_check or pdf_b64_check:
+                # Задание уже сгенерировано — отправляем его без повторной генерации
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("Решить", callback_data=f"solve:{task_id}"), InlineKeyboardButton("Удалить", callback_data=f"del:{task_id}")]])
+                try:
+                    if pdf_url_check:
+                        if isinstance(pdf_url_check, bytes):
+                            pdf_url_check = pdf_url_check.decode('utf-8')
+                        resp = requests.get(pdf_url_check, timeout=30)
+                        resp.raise_for_status()
+                        content = resp.content
+                        await update.message.reply_document(document=InputFile(io.BytesIO(content), filename=f"task_{task_id}.pdf"), reply_markup=kb)
+                    elif pdf_b64_check:
+                        if isinstance(pdf_b64_check, bytes):
+                            pdf_b64_check = pdf_b64_check.decode('ascii')
+                        data = base64.b64decode(pdf_b64_check)
+                        await update.message.reply_document(document=InputFile(io.BytesIO(data), filename=f"task_{task_id}.pdf"), reply_markup=kb)
+                    
+                    await update.message.reply_text(f"📄 Задание с ID {task_id} уже было сгенерировано и отправлено вам в чат.")
+                    log_event(username, f"/start {task_id}", "already_generated")
+                    return
+                except Exception:
+                    logger.exception('Ошибка при отправке уже сгенерированного PDF')
+                    # Продолжаем стандартную процедуру если не удалось отправить
+        except Exception:
+            logger.exception('Ошибка проверки готовности PDF')
+        
         # Поддерживаем два варианта ключа: task:<id> и просто <id>
         raw = r.get(f"task:{task_id}") or r.get(task_id)
         if raw:
@@ -268,6 +300,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         response = f"Рендер для задачи {task_obj.get('real_id') or task_id} уже в процессе — файл придёт, как только будет готов."
                 except Exception:
                     logger.exception('Не удалось поставить задачу в очередь рендера')
+                    response = "Извините. Сервис временно недоступен. Мы уже разбираемся с проблемой."
                 
                 # Отправляем текстовое сообщение только если файл НЕ был отправлен (задача в очереди)
                 try:
