@@ -365,6 +365,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         # Проверка: есть ли у пользователя активная задача в HF
         user_active_key = f"user_active_hf:{chat_id}"
         active_task_id = r.get(user_active_key)
+        logger.info('Check active task for user %s: key=%s, value=%s', chat_id, user_active_key, active_task_id)
         if active_task_id:
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -375,7 +376,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         
         # СРАЗУ устанавливаем флаг активной задачи, чтобы заблокировать параллельные запросы
         r.set(user_active_key, task_id, ex=REDIS_TTL)
-        logger.info('Set active task flag for user %s: %s', chat_id, task_id)
+        logger.info('Set active task flag for user %s: key=%s, task_id=%s', chat_id, user_active_key, task_id)
         
         raw = r.get(f"task:{task_id}") or r.get(task_id)
         if not raw:
