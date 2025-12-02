@@ -286,6 +286,15 @@ async def notify_user_with_file(task_id: str, file_bytes: bytes, is_pdf: bool):
         assignee = r.get(f"task_assignee:{task_id}")
         if assignee:
             chat_id = assignee.decode('utf-8') if isinstance(assignee, bytes) else str(assignee)
+            
+            # Если это решение — очистить флаг активной задачи пользователя
+            if is_solution:
+                try:
+                    r.delete(f"user_active_hf:{chat_id}")
+                    logger.info('Cleared active task flag for user %s (via render_service)', chat_id)
+                except Exception:
+                    logger.exception('Failed to clear user active task flag')
+            
             if TELEGRAM_TOKEN:
                 url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/"
                 if is_pdf:
