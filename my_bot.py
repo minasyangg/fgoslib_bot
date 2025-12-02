@@ -212,21 +212,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             response = None
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("Решить", callback_data=f"solve:{task_id}"), InlineKeyboardButton("Удалить", callback_data=f"del:{task_id}")]])
             try:
-                png_url = r.get(f"task_png_url:{task_id}") or r.get(f"task_pdf_url:{task_id}")
-                png_b64 = None
-                if png_url:
-                    if isinstance(png_url, bytes):
-                        png_url = png_url.decode('utf-8')
-                    # скачиваем и отправляем пользователю
+                # Проверяем наличие готового PDF
+                pdf_url = r.get(f"task_pdf_url:{task_id}")
+                pdf_b64 = None
+                if pdf_url:
+                    if isinstance(pdf_url, bytes):
+                        pdf_url = pdf_url.decode('utf-8')
+                    # скачиваем и отправляем пользователю как PDF
                     try:
-                        resp = requests.get(png_url, timeout=30)
+                        resp = requests.get(pdf_url, timeout=30)
                         resp.raise_for_status()
                         content = resp.content
-                        # decide type by URL
-                        if png_url.lower().endswith('.png'):
-                            await update.message.reply_photo(photo=content, reply_markup=kb)
-                        else:
-                            await update.message.reply_document(document=InputFile(io.BytesIO(content), filename=f"task_{task_obj.get('real_id') or task_id}.pdf"), reply_markup=kb)
+                        await update.message.reply_document(document=InputFile(io.BytesIO(content), filename=f"task_{task_obj.get('real_id') or task_id}.pdf"), reply_markup=kb)
                         response = f"Задача {task_obj.get('real_id') or task_id} готова и отправлена." 
                     except Exception:
                         logger.exception('Ошибка при скачивании/отправке файла по URL')
@@ -239,24 +236,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             alt = alt.decode('utf-8')
                         # If alt looks like a URL, treat as such, otherwise treat as base64 blob
                         if isinstance(alt, str) and alt.startswith('http'):
-                            png_url = alt
+                            pdf_url = alt
                         else:
-                            png_b64 = alt
+                            pdf_b64 = alt
                     else:
-                        # check base64 blobs
-                        png_b64 = r.get(f"task_png:{task_id}") or r.get(f"task_pdf:{task_id}")
-                    if png_b64:
-                        if isinstance(png_b64, bytes):
-                            png_b64 = png_b64.decode('ascii')
+                        # check base64 blobs — только PDF
+                        pdf_b64 = r.get(f"task_pdf:{task_id}")
+                    if pdf_b64:
+                        if isinstance(pdf_b64, bytes):
+                            pdf_b64 = pdf_b64.decode('ascii')
                         try:
-                            data = base64.b64decode(png_b64)
-                            # we don't know type; try PNG first
-                            try:
-                                await update.message.reply_photo(photo=data, reply_markup=kb)
-                                response = f"Задача {task_obj.get('real_id') or task_id} готова и отправлена." 
-                            except Exception:
-                                await update.message.reply_document(document=InputFile(io.BytesIO(data), filename=f"task_{task_obj.get('real_id') or task_id}.pdf"), reply_markup=kb)
-                                response = f"Задача {task_obj.get('real_id') or task_id} готова и отправлена." 
+                            data = base64.b64decode(pdf_b64)
+                            # Всегда отправляем как PDF
+                            await update.message.reply_document(document=InputFile(io.BytesIO(data), filename=f"task_{task_obj.get('real_id') or task_id}.pdf"), reply_markup=kb)
+                            response = f"Задача {task_obj.get('real_id') or task_id} готова и отправлена." 
                         except Exception:
                             logger.exception('Ошибка декодирования base64')
 
