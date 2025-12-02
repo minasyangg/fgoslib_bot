@@ -268,12 +268,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         response = f"Рендер для задачи {task_obj.get('real_id') or task_id} уже в процессе — файл придёт, как только будет готов."
                 except Exception:
                     logger.exception('Не удалось поставить задачу в очередь рендера')
-
-            # Если файл НЕ был отправлен (response описывает постановку в очередь) — отправляем только текст без кнопок
-            try:
-                await update.message.reply_text(response)
-            except Exception:
-                logger.exception('Ошибка отправки response пользователю')
+                
+                # Отправляем текстовое сообщение только если файл НЕ был отправлен (задача в очереди)
+                try:
+                    await update.message.reply_text(response)
+                except Exception:
+                    logger.exception('Ошибка отправки response пользователю')
+            # Если PDF уже был отправлен — не отправляем дополнительное текстовое сообщение
 
             log_event(username, f"/start {task_id}", response)
             return
@@ -434,18 +435,41 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     elif data.startswith('del:'):
         task_id = data.split(':',1)[1]
-        # Удаляем ключи
+        chat_id = query.message.chat_id
+        # Удаляем ВСЕ связанные ключи из Redis
         try:
-            r.delete(f"task:{task_id}")
-            r.delete(f"task_assignee:{task_id}")
-            r.delete(f"task_result:{task_id}")
-            # также можно удалить session, если нужно
-            await query.edit_message_text('Задача удалена.')
-            await context.bot.send_message(chat_id=query.message.chat_id, text=f'Задача {task_id} удалена.')
+            keys_to_delete = [
+                f"task:{task_id}",
+                f"task_assignee:{task_id}",
+                f"task_result:{task_id}",
+                f"task_pdf:{task_id}",
+                f"task_pdf_url:{task_id}",
+                f"task_pdf_result:{task_id}",
+                f"task_pending:{task_id}",
+                f"task_pending_hf:{task_id}",
+                f"hf_render:{task_id}",
+                f"task:hf_render:{task_id}",
+                f"task_assignee:hf_render:{task_id}",
+            ]
+            for key in keys_to_delete:
+                r.delete(key)
+            
+            # Удаляем сообщение из чата (вместо редактирования)
+            try:
+                await query.message.delete()
+            except Exception:
+                # Если не удалось удалить — попробуем отредактировать
+                await query.edit_message_text('Задача удалена.')
+            
+            # Отправляем подтверждение
+            await context.bot.send_message(chat_id=chat_id, text=f'🗑 Задача {task_id} удалена.')
             log_event(username, f"delete {task_id}", 'deleted')
         except Exception as e:
             logger.exception('Ошибка удаления задачи')
-            await query.edit_message_text(f'Ошибка при удалении: {e}')
+            try:
+                await query.edit_message_text(f'Ошибка при удалении: {e}')
+            except Exception:
+                pass
             log_event(username, f"delete {task_id}", f'error: {e}')
     else:
         await query.edit_message_text('Неизвестное действие.')
